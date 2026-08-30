@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import http.cookies
@@ -12,8 +14,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import ssl
 import subprocess
+import tarfile
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,6 +31,7 @@ DB_PATH = DATA_DIR / "proxy.db"
 NGINX_OUTPUT = Path(os.environ.get("NGINX_OUTPUT", "/etc/nginx/conf.d/proxy-hosts.conf"))
 WEB_ROOT = Path(__file__).with_name("web")
 CERT_ROOT = Path(os.environ.get("CERT_ROOT", "/etc/letsencrypt/live"))
+CERT_STORAGE_ROOT = Path(os.environ.get("CERT_STORAGE_ROOT", str(CERT_ROOT.parent)))
 ACME_ROOT = os.environ.get("ACME_ROOT", "/var/www/certbot")
 ACCESS_LOG = Path(os.environ.get("ACCESS_LOG", "/data/access.log"))
 ADMIN_USER = os.environ.get("ADMIN_USERNAME", "admin")
@@ -33,6 +39,9 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me-now")
 SESSION_TTL = 12 * 60 * 60
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+BACKUP_MAGIC = b"GATEHOUSE-BACKUP-1\n"
+BACKUP_ITERATIONS = 200_000
+MAX_BACKUP_BYTES = 64 * 1024 * 1024
 
 
 def db() -> sqlite3.Connection:
@@ -75,10 +84,17 @@ def initialize() -> None:
                 upstream_port INTEGER NOT NULL,
                 websocket INTEGER NOT NULL DEFAULT 1,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                allowlist TEXT NOT NULL DEFAULT '',
+                blocklist TEXT NOT NULL DEFAULT '',
                 certificate INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             )"""
         )
+        proxy_columns = {row["name"] for row in connection.execute("PRAGMA table_info(proxy_hosts)")}
+        if "allowlist" not in proxy_columns:
+            connection.execute("ALTER TABLE proxy_hosts ADD COLUMN allowlist TEXT NOT NULL DEFAULT ''")
+        if "blocklist" not in proxy_columns:
+            connection.execute("ALTER TABLE proxy_hosts ADD COLUMN blocklist TEXT NOT NULL DEFAULT ''")
         connection.execute(
             """CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +125,24 @@ def normalize_domains(value: str) -> list[str]:
     return domains
 
 
+def normalize_networks(value: object, label: str) -> list[str]:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value]
+    else:
+        parts = [item.strip() for item in re.split(r"[\s,]+", str(value or ""))]
+    parts = [item for item in parts if item]
+    if len(parts) > 200:
+        raise ValueError(f"{label} supports up to 200 IP addresses or networks")
+    networks = []
+    for item in parts:
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            raise ValueError(f"Invalid {label.lower()} entry: {item}") from None
+    unique = set(networks)
+    return [network.with_prefixlen for network in sorted(unique, key=lambda network: (network.version, int(network.network_address), network.prefixlen))]
+
+
 def validate_payload(payload: dict) -> dict:
     domains = normalize_domains(str(payload.get("domains", "")))
     scheme = str(payload.get("upstream_scheme", "http")).lower()
@@ -128,6 +162,8 @@ def validate_payload(payload: dict) -> dict:
         raise ValueError("Upstream port must be a number") from None
     if not 1 <= port <= 65535:
         raise ValueError("Upstream port must be between 1 and 65535")
+    allowlist = normalize_networks(payload.get("allowlist", ""), "Allowlist")
+    blocklist = normalize_networks(payload.get("blocklist", ""), "Blocklist")
     return {
         "domains": " ".join(domains),
         "upstream_scheme": scheme,
@@ -135,6 +171,8 @@ def validate_payload(payload: dict) -> dict:
         "upstream_port": port,
         "websocket": int(bool(payload.get("websocket", True))),
         "enabled": int(bool(payload.get("enabled", True))),
+        "allowlist": "\n".join(allowlist),
+        "blocklist": "\n".join(blocklist),
     }
 
 
@@ -163,6 +201,41 @@ def certificate_exists(primary_domain: str) -> bool:
     return (directory / "fullchain.pem").exists() and (directory / "privkey.pem").exists()
 
 
+def certificate_details(primary_domain: str, configured: bool = True) -> dict:
+    base = {
+        "installed": False, "status": "missing" if configured else "not_enabled",
+        "issuer": None, "valid_from": None, "expires_at": None,
+        "days_remaining": None, "serial": None, "sans": [],
+    }
+    if not configured:
+        return base
+    directory = CERT_ROOT / primary_domain
+    cert_path = directory / "cert.pem"
+    if not cert_path.exists() or not certificate_exists(primary_domain):
+        return base
+    base["installed"] = True
+    try:
+        decoded = ssl._ssl._test_decode_cert(str(cert_path))
+        valid_from = datetime.fromtimestamp(ssl.cert_time_to_seconds(decoded["notBefore"]), timezone.utc)
+        expires_at = datetime.fromtimestamp(ssl.cert_time_to_seconds(decoded["notAfter"]), timezone.utc)
+        now = datetime.now(timezone.utc)
+        remaining = (expires_at - now).days
+        issuer_fields = {key: value for group in decoded.get("issuer", ()) for key, value in group}
+        issuer_parts = [issuer_fields.get("organizationName"), issuer_fields.get("commonName")]
+        base.update({
+            "status": "expired" if expires_at <= now else "expiring" if remaining <= 30 else "valid",
+            "issuer": " · ".join(dict.fromkeys(part for part in issuer_parts if part)) or "Unknown issuer",
+            "valid_from": valid_from.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "days_remaining": remaining,
+            "serial": decoded.get("serialNumber"),
+            "sans": [value for kind, value in decoded.get("subjectAltName", ()) if kind == "DNS"],
+        })
+    except (KeyError, OSError, ValueError, ssl.SSLError):
+        base["status"] = "invalid"
+    return base
+
+
 def host_config(row: sqlite3.Row) -> str:
     domains = row["domains"].split()
     primary = domains[0]
@@ -170,12 +243,22 @@ def host_config(row: sqlite3.Row) -> str:
     if ":" in upstream_host and not upstream_host.startswith("["):
         upstream_host = f"[{upstream_host}]"
     upstream = f'{row["upstream_scheme"]}://{upstream_host}:{row["upstream_port"]}'
+    allowed = row["allowlist"].split()
+    blocked = row["blocklist"].split()
+    access_lines = [f"            deny {network};" for network in blocked]
+    access_lines.extend(f"            allow {network};" for network in allowed)
+    if allowed:
+        access_lines.append("            deny all;")
+    access_rules = "\n".join(access_lines)
+    if access_rules:
+        access_rules += "\n"
     upgrade_headers = """
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;""" if row["websocket"] else ""
     common = f"""
         location ^~ /.well-known/acme-challenge/ {{ root {ACME_ROOT}; }}
         location / {{
+{access_rules}
             proxy_pass {upstream};
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -189,7 +272,9 @@ def host_config(row: sqlite3.Row) -> str:
     if row["certificate"] and certificate_exists(primary):
         http_body = f"""
         location ^~ /.well-known/acme-challenge/ {{ root {ACME_ROOT}; }}
-        location / {{ return 301 https://$host$request_uri; }}"""
+        location / {{
+{access_rules}            return 301 https://$host$request_uri;
+        }}"""
         https = f"""
 server {{
     listen 443 ssl;
@@ -388,6 +473,200 @@ def shutil_which(command: str) -> str | None:
     return None
 
 
+def validate_backup_passphrase(passphrase: object) -> str:
+    value = str(passphrase or "")
+    if len(value) < 12:
+        raise ValueError("Backup passphrase must be at least 12 characters")
+    if len(value) > 1024 or "\n" in value or "\r" in value:
+        raise ValueError("Backup passphrase is invalid")
+    return value
+
+
+def openssl_crypt(source: Path, destination: Path, passphrase: str, decrypt: bool = False) -> None:
+    if not shutil_which("openssl"):
+        raise RuntimeError("OpenSSL is required for encrypted backups")
+    command = ["openssl", "enc", "-aes-256-cbc", "-salt", "-pbkdf2", "-iter", str(BACKUP_ITERATIONS), "-md", "sha256"]
+    if decrypt:
+        command.append("-d")
+    command.extend(["-in", str(source), "-out", str(destination), "-pass", "stdin"])
+    result = subprocess.run(command, input=passphrase + "\n", text=True, capture_output=True, timeout=180)
+    if result.returncode:
+        destination.unlink(missing_ok=True)
+        raise ValueError("Incorrect passphrase or damaged backup file")
+
+
+def database_snapshot(destination: Path) -> None:
+    source = sqlite3.connect(DB_PATH)
+    target = sqlite3.connect(destination)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+
+
+def create_backup(passphrase: object) -> tuple[Path, dict]:
+    passphrase = validate_backup_passphrase(passphrase)
+    descriptor, output_name = tempfile.mkstemp(prefix="gatehouse-", suffix=".ghbackup")
+    os.close(descriptor)
+    output = Path(output_name)
+    try:
+        with tempfile.TemporaryDirectory(prefix="gatehouse-backup-") as temporary:
+            stage = Path(temporary)
+            database_snapshot(stage / "proxy.db")
+            with sqlite3.connect(stage / "proxy.db") as connection:
+                route_count = connection.execute("SELECT COUNT(*) FROM proxy_hosts").fetchone()[0]
+                user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            certificate_count = sum(1 for path in CERT_ROOT.glob("*") if path.is_dir() and (path / "fullchain.pem").exists()) if CERT_ROOT.exists() else 0
+            manifest = {
+                "format": "gatehouse-backup", "version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "routes": route_count, "users": user_count, "certificates": certificate_count,
+            }
+            (stage / "manifest.json").write_text(json.dumps(manifest, indent=2))
+            certificate_stage = stage / "letsencrypt"
+            certificate_stage.mkdir()
+            if CERT_STORAGE_ROOT.exists():
+                shutil.copytree(CERT_STORAGE_ROOT, certificate_stage, symlinks=True, dirs_exist_ok=True)
+            archive = stage / "payload.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                bundle.add(stage / "manifest.json", arcname="manifest.json")
+                bundle.add(stage / "proxy.db", arcname="proxy.db")
+                bundle.add(certificate_stage, arcname="letsencrypt", recursive=True)
+            encrypted = stage / "encrypted.bin"
+            openssl_crypt(archive, encrypted, passphrase)
+            ciphertext = encrypted.read_bytes()
+            if len(ciphertext) + len(BACKUP_MAGIC) + 48 > MAX_BACKUP_BYTES:
+                raise ValueError("Backup is larger than the 64 MiB migration limit")
+            mac_salt = secrets.token_bytes(16)
+            mac_key = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), mac_salt, BACKUP_ITERATIONS, dklen=32)
+            signature = hmac.new(mac_key, BACKUP_MAGIC + mac_salt + ciphertext, hashlib.sha256).digest()
+            output.write_bytes(BACKUP_MAGIC + mac_salt + signature + ciphertext)
+            output.chmod(0o600)
+            return output, manifest
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+
+
+def decrypt_backup(data: bytes, passphrase: object, destination: Path) -> None:
+    passphrase = validate_backup_passphrase(passphrase)
+    header_size = len(BACKUP_MAGIC) + 16 + 32
+    if len(data) < header_size or not data.startswith(BACKUP_MAGIC):
+        raise ValueError("This is not a Gatehouse backup file")
+    mac_salt = data[len(BACKUP_MAGIC):len(BACKUP_MAGIC) + 16]
+    signature = data[len(BACKUP_MAGIC) + 16:header_size]
+    ciphertext = data[header_size:]
+    mac_key = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), mac_salt, BACKUP_ITERATIONS, dklen=32)
+    expected = hmac.new(mac_key, BACKUP_MAGIC + mac_salt + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("Incorrect passphrase or damaged backup file")
+    encrypted = destination.with_suffix(".encrypted")
+    encrypted.write_bytes(ciphertext)
+    try:
+        openssl_crypt(encrypted, destination, passphrase, decrypt=True)
+    finally:
+        encrypted.unlink(missing_ok=True)
+
+
+def validate_restore_stage(stage: Path) -> dict:
+    manifest_path, database_path = stage / "manifest.json", stage / "proxy.db"
+    certificate_path = stage / "letsencrypt"
+    if (manifest_path.is_symlink() or database_path.is_symlink() or certificate_path.is_symlink()
+            or not manifest_path.is_file() or not database_path.is_file() or not certificate_path.is_dir()):
+        raise ValueError("Backup is missing required migration data")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("Backup manifest is invalid") from error
+    if manifest.get("format") != "gatehouse-backup" or manifest.get("version") != 1:
+        raise ValueError("This backup version is not supported")
+    try:
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise ValueError("Backup database failed its integrity check")
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"proxy_hosts", "users"}.issubset(tables):
+            raise ValueError("Backup database is missing required tables")
+        if connection.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] < 1:
+            raise ValueError("Backup must contain an enabled administrator")
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Backup database is invalid") from error
+    finally:
+        if "connection" in locals():
+            connection.close()
+    return manifest
+
+
+def clear_directory(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    resolved = directory.resolve()
+    if resolved == Path("/") or len(resolved.parts) < 3:
+        raise RuntimeError("Refusing to replace an unsafe certificate directory")
+    for child in directory.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+
+
+def restore_backup(data: bytes, passphrase: object) -> dict:
+    if not data or len(data) > MAX_BACKUP_BYTES:
+        raise ValueError("Backup file must be smaller than 64 MiB")
+    with tempfile.TemporaryDirectory(prefix="gatehouse-restore-") as temporary:
+        work = Path(temporary)
+        archive = work / "payload.tar.gz"
+        decrypt_backup(data, passphrase, archive)
+        stage = work / "stage"
+        stage.mkdir()
+        try:
+            with tarfile.open(archive, "r:gz") as bundle:
+                members = bundle.getmembers()
+                if len(members) > 10_000 or sum(member.size for member in members) > 256 * 1024 * 1024:
+                    raise ValueError("Backup archive exceeds the safe extraction limit")
+                for member in members:
+                    first = Path(member.name).parts[0] if Path(member.name).parts else ""
+                    if first not in {"manifest.json", "proxy.db", "letsencrypt"} or member.isdev() or member.isfifo():
+                        raise ValueError("Backup contains an unsafe archive entry")
+                bundle.extractall(stage, filter="data")
+        except (tarfile.TarError, OSError) as error:
+            raise ValueError("Backup archive is invalid") from error
+        manifest = validate_restore_stage(stage)
+
+        rollback_db = work / "rollback.db"
+        database_snapshot(rollback_db)
+        rollback_certs = work / "rollback-letsencrypt"
+        rollback_certs.mkdir()
+        if CERT_STORAGE_ROOT.exists():
+            shutil.copytree(CERT_STORAGE_ROOT, rollback_certs, symlinks=True, dirs_exist_ok=True)
+        secret_path = DATA_DIR / "session_secret"
+        previous_secret = secret_path.read_bytes() if secret_path.exists() else None
+        try:
+            incoming_db = DATA_DIR / ".proxy.db.restore"
+            shutil.copy2(stage / "proxy.db", incoming_db)
+            incoming_db.replace(DB_PATH)
+            clear_directory(CERT_STORAGE_ROOT)
+            shutil.copytree(stage / "letsencrypt", CERT_STORAGE_ROOT, symlinks=True, dirs_exist_ok=True)
+            secret_path.unlink(missing_ok=True)
+            initialize()
+            render_and_reload()
+        except Exception as error:
+            shutil.copy2(rollback_db, DB_PATH)
+            clear_directory(CERT_STORAGE_ROOT)
+            shutil.copytree(rollback_certs, CERT_STORAGE_ROOT, symlinks=True, dirs_exist_ok=True)
+            if previous_secret is None:
+                secret_path.unlink(missing_ok=True)
+            else:
+                secret_path.write_bytes(previous_secret)
+                secret_path.chmod(0o600)
+            try:
+                render_and_reload()
+            except Exception:
+                pass
+            raise RuntimeError(f"Restore failed and the previous configuration was recovered: {error}") from error
+        return manifest
+
+
 def secret() -> bytes:
     return (DATA_DIR / "session_secret").read_bytes()
 
@@ -429,11 +708,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def payload(self) -> dict:
+    def payload(self, max_size: int = 64_000) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 64_000:
+        if length < 0 or length > max_size:
             raise ValueError("Request is too large")
         return json.loads(self.rfile.read(length) or b"{}")
+
+    def file_response(self, path: Path, filename: str) -> None:
+        size = path.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        with path.open("rb") as stream:
+            shutil.copyfileobj(stream, self.wfile)
 
     def current_user(self) -> sqlite3.Row | None:
         cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
@@ -471,6 +762,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with db() as connection:
                 users = [public_user(row) for row in connection.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE")]
             self.json_response(200, users); return
+        if path == "/api/backups/info":
+            if not self.require_admin(): return
+            with db() as connection:
+                route_count = connection.execute("SELECT COUNT(*) FROM proxy_hosts").fetchone()[0]
+                user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            certificate_count = sum(1 for item in CERT_ROOT.glob("*") if item.is_dir() and (item / "fullchain.pem").exists()) if CERT_ROOT.exists() else 0
+            self.json_response(200, {
+                "routes": route_count, "users": user_count, "certificates": certificate_count,
+                "encrypted": True, "max_restore_bytes": MAX_BACKUP_BYTES,
+            }); return
         if path == "/api/hosts":
             if not self.require_auth(): return
             with db() as connection:
@@ -478,7 +779,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for row in rows:
                 row["websocket"] = bool(row["websocket"])
                 row["enabled"] = bool(row["enabled"])
-                row["certificate"] = bool(row["certificate"] and certificate_exists(row["domains"].split()[0]))
+                primary_domain = row["domains"].split()[0]
+                row["certificate_info"] = certificate_details(primary_domain, bool(row["certificate"]))
+                row["certificate"] = bool(row["certificate_info"]["installed"])
             self.json_response(200, rows)
             return
         if path == "/api/stats":
@@ -497,7 +800,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (FileNotFoundError, IsADirectoryError):
             self.send_error(404)
             return
-        mime = {".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript"}.get(file_path.suffix, "application/octet-stream")
+        mime = {".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript", ".png": "image/png"}.get(file_path.suffix, "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
@@ -507,7 +810,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         try:
-            payload = self.payload()
+            payload = self.payload(90 * 1024 * 1024 if path == "/api/backups/restore" else 64_000)
             if path == "/api/login":
                 with db() as connection:
                     user = connection.execute("SELECT * FROM users WHERE username = ? AND enabled = 1", (str(payload.get("username", "")).strip(),)).fetchone()
@@ -521,13 +824,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/logout":
                 self.json_response(200, {"ok": True}, "nginx_manager_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
                 return
+            if path == "/api/backups/create":
+                if not self.require_admin(): return
+                backup_path, manifest = create_backup(payload.get("passphrase"))
+                try:
+                    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                    self.file_response(backup_path, f"gatehouse_{stamp}.ghbackup")
+                finally:
+                    backup_path.unlink(missing_ok=True)
+                return
+            if path == "/api/backups/restore":
+                if not self.require_admin(): return
+                encoded = payload.get("backup")
+                if not isinstance(encoded, str):
+                    raise ValueError("Choose a Gatehouse backup file")
+                try:
+                    backup_data = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError):
+                    raise ValueError("Backup upload is invalid") from None
+                manifest = restore_backup(backup_data, payload.get("passphrase"))
+                self.json_response(200, {"ok": True, "restored": manifest, "signed_out": True})
+                return
             if path == "/api/hosts":
                 values = validate_payload(payload)
                 connection = db()
                 try:
                     ensure_domains_available(connection, values["domains"])
                     cursor = connection.execute(
-                        "INSERT INTO proxy_hosts (domains, upstream_scheme, upstream_host, upstream_port, websocket, enabled, created_at) VALUES (:domains,:upstream_scheme,:upstream_host,:upstream_port,:websocket,:enabled,:created_at)",
+                        "INSERT INTO proxy_hosts (domains, upstream_scheme, upstream_host, upstream_port, websocket, enabled, allowlist, blocklist, created_at) VALUES (:domains,:upstream_scheme,:upstream_host,:upstream_port,:websocket,:enabled,:allowlist,:blocklist,:created_at)",
                         values | {"created_at": int(time.time())},
                     )
                     render_and_reload(connection=connection)
@@ -593,7 +917,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             connection = db()
             try:
                 ensure_domains_available(connection, values["domains"], values["id"])
-                cursor = connection.execute("UPDATE proxy_hosts SET domains=:domains, upstream_scheme=:upstream_scheme, upstream_host=:upstream_host, upstream_port=:upstream_port, websocket=:websocket, enabled=:enabled WHERE id=:id", values)
+                cursor = connection.execute("UPDATE proxy_hosts SET domains=:domains, upstream_scheme=:upstream_scheme, upstream_host=:upstream_host, upstream_port=:upstream_port, websocket=:websocket, enabled=:enabled, allowlist=:allowlist, blocklist=:blocklist WHERE id=:id", values)
                 if not cursor.rowcount: raise ValueError("Proxy host not found")
                 render_and_reload(connection=connection)
                 connection.commit()
@@ -643,16 +967,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             connection.close()
 
     def issue_certificate(self, host_id: int, payload: dict) -> None:
-        email = str(payload.get("email", "")).strip()
-        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
-            raise ValueError("Enter a valid email address")
         with db() as connection:
             row = connection.execute("SELECT * FROM proxy_hosts WHERE id = ?", (host_id,)).fetchone()
         if not row: raise ValueError("Proxy host not found")
         domains = row["domains"].split()
-        command = ["certbot", "certonly", "--webroot", "-w", ACME_ROOT, "--non-interactive", "--agree-tos", "--keep-until-expiring", "--email", email]
-        for domain in domains:
-            command.extend(["-d", domain])
+        force = bool(payload.get("force", False))
+        if force:
+            if not certificate_exists(domains[0]):
+                raise ValueError("No installed certificate is available to renew")
+            command = ["certbot", "renew", "--cert-name", domains[0], "--force-renewal", "--non-interactive"]
+        else:
+            email = str(payload.get("email", "")).strip()
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+                raise ValueError("Enter a valid email address")
+            command = ["certbot", "certonly", "--webroot", "-w", ACME_ROOT, "--non-interactive", "--agree-tos", "--keep-until-expiring", "--email", email]
+            for domain in domains:
+                command.extend(["-d", domain])
         result = subprocess.run(command, text=True, capture_output=True, timeout=180)
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout).strip()[-2000:])
@@ -666,7 +996,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise
         finally:
             connection.close()
-        self.json_response(200, {"ok": True})
+        self.json_response(200, {"ok": True, "certificate": certificate_details(domains[0])})
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)

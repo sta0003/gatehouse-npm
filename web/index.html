@@ -7,12 +7,14 @@
   <title>Gatehouse · Network Control</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/mobile.css">
+  <link rel="stylesheet" href="/certificates.css">
+  <link rel="stylesheet" href="/backups.css">
 </head>
 <body>
   <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div><div class="noise"></div>
 
   <section id="login" class="login-screen hidden">
-    <div class="login-brand"><div class="logo-icon">G</div><span>GATEHOUSE</span></div>
+    <div class="login-brand"><img class="brand-logo" src="/assets/gatehouse-logo.png" alt="Gatehouse"></div>
     <div class="login-panel glass">
       <div class="login-orbit"><i></i><i></i><i></i><span>G</span></div>
       <p class="overline">SECURE CONTROL PLANE</p>
@@ -30,13 +32,14 @@
 
   <div id="app" class="app-shell hidden">
     <aside class="sidebar glass">
-      <div class="brand"><div class="logo-icon">G</div><div><strong>Gatehouse</strong><span>NETWORK CONTROL</span></div></div>
+      <div class="brand"><img class="brand-logo" src="/assets/gatehouse-logo.png" alt="Gatehouse"></div>
       <nav>
         <a href="#overview" data-view="overview" class="active"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg><span>Overview</span></a>
         <a href="#routes" data-view="routes"><svg viewBox="0 0 24 24"><path d="M5 5h5v5H5V5Zm9 9h5v5h-5v-5ZM7.5 10v3.5A3.5 3.5 0 0 0 11 17h3m0-10h-4"/><circle cx="17" cy="7" r="3"/></svg><span>Proxy hosts</span><b id="nav-route-count">0</b></a>
         <a href="#certificates" data-view="certificates"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg><span>Certificates</span></a>
         <a href="#activity" data-view="activity"><svg viewBox="0 0 24 24"><path d="M4 12h3l2-6 4 12 2-6h5"/></svg><span>Live traffic</span></a>
         <a id="users-nav" href="#users" data-view="users" class="hidden"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c.4-4 2.4-6 6-6s5.6 2 6 6m1-10h5m-2.5-2.5v5"/></svg><span>Users</span></a>
+        <a id="backups-nav" href="#backups" data-view="backups" class="hidden"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 5v5h8V5M8 19v-5h8v5"/></svg><span>Backup & restore</span></a>
       </nav>
       <div class="side-bottom">
         <div class="gateway-status"><span class="pulse"></span><div><strong>Gateway online</strong><small>Listening for traffic</small></div></div>
@@ -115,6 +118,20 @@
           </article>
         </section>
 
+        <section id="certificates-detail" class="certificates-detail hidden">
+          <div class="cert-metrics">
+            <article class="metric glass"><div class="metric-head"><span>PROTECTED HOSTS</span><i class="green"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg></i></div><strong id="cert-protected">0</strong><small id="cert-coverage">No certificates installed</small></article>
+            <article class="metric glass"><div class="metric-head"><span>NEEDS ATTENTION</span><i class="amber"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg></i></div><strong id="cert-expiring">0</strong><small>Expiring, expired or invalid</small></article>
+            <article class="metric glass"><div class="metric-head"><span>UNPROTECTED</span><i class="violet"><svg viewBox="0 0 24 24"><path d="M6 10V7a6 6 0 0 1 11.5-2.4M5 10h14v10H5z"/></svg></i></div><strong id="cert-missing">0</strong><small>Proxy hosts without TLS</small></article>
+            <article class="metric glass"><div class="metric-head"><span>NEXT EXPIRY</span><i class="cyan"><svg viewBox="0 0 24 24"><path d="M7 3v3m10-3v3M4 9h16M5 5h14v15H5z"/></svg></i></div><strong id="cert-next-expiry" class="cert-date">—</strong><small id="cert-next-note">No active certificate</small></article>
+          </div>
+          <article class="panel glass certificate-panel">
+            <div class="panel-head"><div><p class="overline">TLS INVENTORY</p><h2>Certificate lifecycle</h2></div><div class="certificate-tools"><span><i class="live-dot"></i> Automatic renewal enabled</span><input id="certificate-search" placeholder="Search certificates"></div></div>
+            <div class="certificate-head"><span>HOST</span><span>STATUS</span><span>ISSUER</span><span>VALID UNTIL</span><span>RENEWAL</span><span></span></div>
+            <div id="certificate-list"></div>
+          </article>
+        </section>
+
         <section id="users-detail" class="users-detail hidden">
           <div class="user-summary glass">
             <div><p class="overline">ACCESS CONTROL</p><h2>Dashboard users</h2><p>Operators can manage proxy hosts and certificates. Administrators can also manage accounts.</p></div>
@@ -124,6 +141,37 @@
             <div class="users-head"><span>USER</span><span>ROLE</span><span>STATUS</span><span>CREATED</span><span></span></div>
             <div id="users-list"></div>
           </article>
+        </section>
+
+        <section id="backups-detail" class="backups-detail hidden">
+          <div class="backup-summary glass">
+            <div><p class="overline">DISASTER RECOVERY</p><h2>Portable configuration backups</h2><p>Move Gatehouse routes, dashboard users, access rules, and certificates to a fresh installation.</p></div>
+            <div class="backup-counts"><span><strong id="backup-route-count">0</strong>routes</span><span><strong id="backup-user-count">0</strong>users</span><span><strong id="backup-cert-count">0</strong>certificates</span></div>
+          </div>
+          <div class="backup-grid">
+            <article class="panel glass backup-card">
+              <div class="backup-icon export"><svg viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 19h14"/></svg></div>
+              <div><p class="overline">EXPORT</p><h2>Create encrypted backup</h2><p>Downloads a single migration file containing the database and complete Let's Encrypt state.</p></div>
+              <form id="backup-create-form">
+                <label>Encryption passphrase <small>At least 12 characters. It cannot be recovered.</small><input name="passphrase" type="password" minlength="12" autocomplete="new-password" required></label>
+                <label>Confirm passphrase<input name="confirmation" type="password" minlength="12" autocomplete="new-password" required></label>
+                <p id="backup-create-error" class="form-error"></p>
+                <button type="submit" class="primary full"><span>Download backup</span><span>↓</span></button>
+              </form>
+            </article>
+            <article class="panel glass backup-card restore-card">
+              <div class="backup-icon restore"><svg viewBox="0 0 24 24"><path d="M12 21V9m-4 4 4-4 4 4"/><path d="M5 5h14"/></svg></div>
+              <div><p class="overline">RESTORE</p><h2>Restore onto this system</h2><p>Validates and stages the backup, then replaces this installation's routes, users, and certificates.</p></div>
+              <form id="backup-restore-form">
+                <label class="backup-file">Gatehouse backup file<input name="backup" type="file" accept=".ghbackup,application/octet-stream" required><span id="backup-file-name">Choose .ghbackup file</span></label>
+                <label>Backup passphrase<input name="passphrase" type="password" minlength="12" autocomplete="current-password" required></label>
+                <div class="restore-warning"><strong>This overwrites the current configuration.</strong><span>A rollback copy is kept during the operation. All dashboard sessions are signed out after success.</span></div>
+                <p id="backup-restore-error" class="form-error"></p>
+                <button type="submit" class="danger full"><span>Validate and restore</span><span>↥</span></button>
+              </form>
+            </article>
+          </div>
+          <div class="backup-footnote glass"><strong>Included</strong><span>Proxy hosts · IP allow/block lists · users and password hashes · Let's Encrypt certificates and renewal accounts</span><strong>Excluded</strong><span>Traffic history · generated NGINX files · <code>.env</code> and deployment-specific settings</span></div>
         </section>
       </section>
     </main>
@@ -135,6 +183,11 @@
       <input type="hidden" name="id">
       <label>Domain names <small>Separate multiple names with spaces or commas</small><input name="domains" placeholder="photos.example.com" required></label>
       <div class="upstream"><label>Scheme<select name="upstream_scheme"><option>http</option><option>https</option></select></label><label class="grow">Hostname or IP<input name="upstream_host" placeholder="192.168.1.50" required></label><label>Port<input name="upstream_port" type="number" min="1" max="65535" value="80" required></label></div>
+      <div class="access-heading"><div><p class="overline">IP ACCESS CONTROL</p><strong>Visitor filtering</strong></div><small>Accepts individual IPv4/IPv6 addresses and CIDR networks.</small></div>
+      <div class="access-grid">
+        <label>Allowlist <small>If populated, every other visitor is denied.</small><textarea name="allowlist" spellcheck="false" placeholder="203.0.113.25&#10;192.168.1.0/24"></textarea></label>
+        <label>Blocklist <small>These entries are denied before allowlist rules.</small><textarea name="blocklist" spellcheck="false" placeholder="198.51.100.44&#10;2001:db8::/32"></textarea></label>
+      </div>
       <label class="switch-row"><span><strong>WebSocket support</strong><small>Enable connection upgrades for real-time applications.</small></span><input name="websocket" type="checkbox" checked><i></i></label>
       <label class="switch-row"><span><strong>Route enabled</strong><small>Publish this route in the live NGINX configuration.</small></span><input name="enabled" type="checkbox" checked><i></i></label>
       <p id="form-error" class="form-error"></p>
@@ -144,11 +197,11 @@
 
   <dialog id="cert-dialog">
     <form id="cert-form">
-      <div class="dialog-head"><div><p class="overline">LET'S ENCRYPT</p><h2>Enable HTTPS</h2></div><button type="button" class="dialog-close close-cert">×</button></div>
-      <input type="hidden" name="id"><div class="info-box">Public DNS must point to this gateway and inbound port 80 must be reachable before requesting a certificate.</div>
-      <label>Renewal email<input name="email" type="email" placeholder="you@example.com" required></label>
+      <div class="dialog-head"><div><p class="overline">LET'S ENCRYPT</p><h2 id="cert-dialog-title">Enable HTTPS</h2></div><button type="button" class="dialog-close close-cert">×</button></div>
+      <input type="hidden" name="id"><input type="hidden" name="force" value="0"><div id="cert-dialog-info" class="info-box">Public DNS must point to this gateway and inbound port 80 must be reachable before requesting a certificate.</div>
+      <label id="cert-email-label">Renewal email<input name="email" type="email" placeholder="you@example.com" required></label>
       <p id="cert-error" class="form-error"></p>
-      <div class="dialog-actions"><button type="button" class="ghost close-cert">Cancel</button><button type="submit" class="primary">Request certificate</button></div>
+      <div class="dialog-actions"><button type="button" class="ghost close-cert">Cancel</button><button id="cert-submit" type="submit" class="primary">Request certificate</button></div>
     </form>
   </dialog>
   <dialog id="user-dialog">

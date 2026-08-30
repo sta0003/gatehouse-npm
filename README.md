@@ -11,12 +11,13 @@ TLS ends at Gatehouse. Your upstream service can use plain HTTP on the trusted L
 ## Start it
 
 1. Install Docker with the Compose plugin.
-2. Copy `.env.example` to `.env` and set a long, unique admin password.
-3. Run `docker compose up -d --build`.
-4. Open `http://<gatehouse-lan-ip>:8080` and sign in as `admin`.
-5. Forward TCP ports 80 and 443 from your router to the Gatehouse machine.
-6. Create public DNS `A`/`AAAA` records for each domain pointing to your public IP.
-7. Add a proxy host, verify HTTP works, then click **Enable HTTPS**.
+2. Run `./gatehouse.sh install` and enter a long, unique administrator password when prompted.
+3. Open `http://<gatehouse-lan-ip>:8080` and sign in as `admin`.
+4. Forward TCP ports 80 and 443 from your router to the Gatehouse machine.
+5. Create public DNS `A`/`AAAA` records for each domain pointing to your public IP.
+6. Add a proxy host, verify HTTP works, then click **Enable HTTPS**.
+
+The helper also supports `start`, `stop`, `restart`, `rebuild`, `update`, `status`, and `logs`. Run `./gatehouse.sh help` for the complete list. It never deletes the persistent `data` or `letsencrypt` directories.
 
 Do not expose port 8080 to the public internet. Restrict it with your host firewall, a VPN, or a trusted management VLAN.
 
@@ -37,6 +38,12 @@ For LAN-only hostnames, split DNS, wildcard certificates, or networks behind CGN
 - Certificates are stored in `./letsencrypt` and persist across rebuilds.
 - The container checks for certificate renewals every 12 hours and reloads NGINX after a successful renewal.
 - Every route change writes a generated config, runs `nginx -t`, and only then reloads NGINX. If validation fails, the previous config is restored.
+
+## Backup and migration
+
+Administrators can open **Backup & restore** in the dashboard to download a passphrase-encrypted `.ghbackup` file. It contains proxy hosts, IP access rules, dashboard users, password hashes, and the complete Let's Encrypt state. Traffic logs, `.env`, generated NGINX files, and machine-specific Compose settings are intentionally excluded.
+
+To migrate, start Gatehouse on the new machine, sign in with its temporary administrator account, open **Backup & restore**, and restore the file using its original passphrase. Gatehouse validates and stages the archive before replacing live data, keeps a rollback copy during the operation, reloads NGINX, and signs out every dashboard session after a successful restore. Keep both the backup and its passphrase secure; neither can recover the other.
 
 ## Local development without Docker
 

@@ -1,0 +1,193 @@
+.certificates-detail {
+  display: grid;
+  gap: 13px;
+}
+
+.cert-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.cert-date {
+  font-size: 24px !important;
+  letter-spacing: -.02em !important;
+}
+
+.certificate-panel {
+  overflow: hidden;
+}
+
+.certificate-tools,
+.certificate-tools > span,
+.certificate-actions,
+.certificate-domain {
+  display: flex;
+  align-items: center;
+}
+
+.certificate-tools {
+  gap: 12px;
+}
+
+.certificate-tools > span {
+  gap: 7px;
+  color: #748091;
+  font-size: 9px;
+}
+
+.certificate-tools .live-dot {
+  margin: 0;
+}
+
+.certificate-tools input {
+  width: 190px;
+}
+
+.certificate-head,
+.certificate-row {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.35fr) 125px minmax(145px, 1fr) 145px 145px 190px;
+  gap: 14px;
+  align-items: center;
+}
+
+.certificate-head {
+  padding: 10px 19px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: #596576;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: .11em;
+}
+
+.certificate-row {
+  padding: 15px 19px;
+  border-bottom: 1px solid rgba(255, 255, 255, .05);
+}
+
+.certificate-row:last-child {
+  border-bottom: 0;
+}
+
+.certificate-domain {
+  gap: 11px;
+  min-width: 0;
+}
+
+.certificate-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: rgba(255, 190, 92, .08);
+  color: var(--amber);
+}
+
+.certificate-mark.secure {
+  background: rgba(93, 227, 163, .09);
+  color: var(--green);
+}
+
+.certificate-mark svg {
+  width: 17px;
+}
+
+.certificate-domain strong,
+.certificate-domain small,
+.certificate-issuer strong,
+.certificate-issuer small,
+.certificate-expiry strong,
+.certificate-expiry small,
+.certificate-renewal strong,
+.certificate-renewal small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.certificate-domain strong,
+.certificate-issuer strong,
+.certificate-expiry strong,
+.certificate-renewal strong {
+  color: #d9e1e9;
+  font-size: 10px;
+}
+
+.certificate-domain small,
+.certificate-issuer small,
+.certificate-expiry small,
+.certificate-renewal small {
+  margin-top: 2px;
+  color: #687486;
+  font-size: 8px;
+}
+
+.cert-status {
+  width: max-content;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .05);
+  color: #8994a4;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .06em;
+}
+
+.cert-status.valid {
+  background: rgba(93, 227, 163, .09);
+  color: var(--green);
+}
+
+.cert-status.expiring {
+  background: rgba(255, 190, 92, .09);
+  color: var(--amber);
+}
+
+.cert-status.expired,
+.cert-status.invalid {
+  background: rgba(255, 102, 132, .1);
+  color: var(--red);
+}
+
+.certificate-actions {
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.certificate-actions .ghost,
+.certificate-actions .primary {
+  padding: 7px 10px;
+  font-size: 9px;
+}
+
+.certificate-actions .icon-button {
+  width: 32px;
+  height: 32px;
+}
+
+.certificate-empty {
+  padding: 55px 20px;
+  color: #626d7e;
+  font-size: 10px;
+  text-align: center;
+}
+
+@media (max-width: 1200px) {
+  .certificate-panel { overflow-x: auto; }
+  .certificate-head, .certificate-row { min-width: 1050px; }
+}
+
+@media (max-width: 900px) {
+  .cert-metrics { grid-template-columns: 1fr 1fr; }
+  .certificate-tools > span { display: none; }
+}
+
+@media (max-width: 520px) {
+  .cert-metrics { grid-template-columns: 1fr; }
+  .certificate-tools input { width: 150px; }
+}
