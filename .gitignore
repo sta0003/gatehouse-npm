@@ -1,4 +1,5 @@
 .env
+.codex/
 data/
 letsencrypt/
 __pycache__/
