@@ -10,6 +10,21 @@ TLS ends at Gatehouse. Your upstream service can use plain HTTP on the trusted L
 
 ## Start it
 
+### Quick install with curl
+
+On a machine with Docker and the Docker Compose plugin installed, run:
+
+```sh
+mkdir gatehouse && cd gatehouse
+curl -fsSL https://github.com/sta0003/gatehouse-npm/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1
+chmod +x gatehouse.sh
+./gatehouse.sh install
+```
+
+The installer will ask you to create the administrator password, build the container, wait for it to become healthy, and print the dashboard address.
+
+### Manual setup
+
 1. Install Docker with the Compose plugin.
 2. Run `./gatehouse.sh install` and enter a long, unique administrator password when prompted.
 3. Open `http://<gatehouse-lan-ip>:8080` and sign in as `admin`.
