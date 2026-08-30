@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080b12">
+  <title>Gatehouse · Network Control</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/mobile.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div><div class="noise"></div>
+
+  <section id="login" class="login-screen hidden">
+    <div class="login-brand"><div class="logo-icon">G</div><span>GATEHOUSE</span></div>
+    <div class="login-panel glass">
+      <div class="login-orbit"><i></i><i></i><i></i><span>G</span></div>
+      <p class="overline">SECURE CONTROL PLANE</p>
+      <h1>Welcome back</h1>
+      <p class="subtle">Sign in to manage your network edge.</p>
+      <form id="login-form">
+        <label>Username<input name="username" autocomplete="username" value="admin" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required autofocus></label>
+        <p id="login-error" class="form-error"></p>
+        <button type="submit" class="primary full">Sign in <span>→</span></button>
+      </form>
+    </div>
+    <p class="login-foot">Private infrastructure · Authenticated access only</p>
+  </section>
+
+  <div id="app" class="app-shell hidden">
+    <aside class="sidebar glass">
+      <div class="brand"><div class="logo-icon">G</div><div><strong>Gatehouse</strong><span>NETWORK CONTROL</span></div></div>
+      <nav>
+        <a href="#overview" data-view="overview" class="active"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg><span>Overview</span></a>
+        <a href="#routes" data-view="routes"><svg viewBox="0 0 24 24"><path d="M5 5h5v5H5V5Zm9 9h5v5h-5v-5ZM7.5 10v3.5A3.5 3.5 0 0 0 11 17h3m0-10h-4"/><circle cx="17" cy="7" r="3"/></svg><span>Proxy hosts</span><b id="nav-route-count">0</b></a>
+        <a href="#certificates" data-view="certificates"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg><span>Certificates</span></a>
+        <a href="#activity" data-view="activity"><svg viewBox="0 0 24 24"><path d="M4 12h3l2-6 4 12 2-6h5"/></svg><span>Live traffic</span></a>
+        <a id="users-nav" href="#users" data-view="users" class="hidden"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c.4-4 2.4-6 6-6s5.6 2 6 6m1-10h5m-2.5-2.5v5"/></svg><span>Users</span></a>
+      </nav>
+      <div class="side-bottom">
+        <div class="gateway-status"><span class="pulse"></span><div><strong>Gateway online</strong><small>Listening for traffic</small></div></div>
+        <button id="logout" class="icon-text"><svg viewBox="0 0 24 24"><path d="M10 5H5v14h5m3-4 4-3-4-3m4 3H9"/></svg>Sign out</button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div><p class="breadcrumb">GATEHOUSE <span>/</span> <b id="view-crumb">OVERVIEW</b></p><h1 id="view-title">Network overview</h1></div>
+        <div class="top-actions"><div class="live"><span></span> LIVE</div><button id="refresh" class="icon-button" aria-label="Refresh data"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5M18 9a7 7 0 0 0-12-2L4 11m2 4a7 7 0 0 0 12 2l2-4"/></svg></button><button id="add-host" class="primary">＋ New proxy host</button></div>
+      </header>
+
+      <div id="password-warning" class="warning hidden"><span>!</span><p><strong>Default password detected</strong> Set <code>ADMIN_PASSWORD</code> before exposing this dashboard.</p></div>
+
+      <section id="overview" class="view-section">
+        <div id="metrics-section" class="metrics-grid">
+          <article class="metric glass"><div class="metric-head"><span>REQUESTS · 24H</span><i class="cyan"><svg viewBox="0 0 24 24"><path d="M4 12h16M14 6l6 6-6 6"/></svg></i></div><strong id="request-count">0</strong><small id="request-note">No traffic recorded</small></article>
+          <article class="metric glass"><div class="metric-head"><span>ACTIVE ROUTES</span><i class="violet"><svg viewBox="0 0 24 24"><path d="M5 5h5v5H5V5Zm9 9h5v5h-5v-5ZM8 10v4a3 3 0 0 0 3 3h3m0-10h-4"/><circle cx="17" cy="7" r="3"/></svg></i></div><strong id="active-count">0</strong><small id="route-note">0 configured</small></article>
+          <article class="metric glass"><div class="metric-head"><span>AVG RESPONSE</span><i class="amber"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg></i></div><strong><span id="latency">0</span><em>ms</em></strong><small>Across proxied requests</small></article>
+          <article class="metric glass"><div class="metric-head"><span>ERROR RATE</span><i class="green"><svg viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></svg></i></div><strong><span id="error-rate">0</span><em>%</em></strong><small id="error-note">Healthy</small></article>
+        </div>
+
+        <div id="charts-section" class="charts-grid">
+          <article class="panel glass traffic-panel">
+            <div class="panel-head"><div><p class="overline">TRAFFIC</p><h2>Request volume</h2></div><div class="chart-legend"><span><i class="legend-request"></i>Requests</span><span><i class="legend-error"></i>Errors</span><b>LAST 24 HOURS</b></div></div>
+            <div class="chart-wrap"><svg id="traffic-chart" role="img" aria-label="Requests and errors during the last 24 hours"></svg><div id="chart-empty" class="chart-empty hidden">Traffic will appear here after NGINX receives requests.</div></div>
+          </article>
+          <article class="panel glass status-panel">
+            <div class="panel-head"><div><p class="overline">RESPONSES</p><h2>Status codes</h2></div></div>
+            <div class="donut-wrap"><svg id="status-chart" viewBox="0 0 160 160" role="img" aria-label="HTTP status code distribution"><circle class="donut-track" cx="80" cy="80" r="58"/><g id="donut-series" transform="rotate(-90 80 80)"></g></svg><div class="donut-label"><strong id="donut-total">0</strong><span>TOTAL</span></div></div>
+            <div id="status-legend" class="status-legend"></div>
+          </article>
+        </div>
+
+        <div id="lower-section" class="lower-grid">
+          <article id="routes" class="panel glass routes-panel">
+            <div class="panel-head"><div><p id="route-kicker" class="overline">ROUTING</p><h2 id="route-title">Proxy hosts</h2></div><div class="route-tools"><input id="search" placeholder="Search routes"><button id="add-host-secondary" class="ghost">＋ Add</button></div></div>
+            <div class="route-table-head"><span>DOMAIN</span><span>DESTINATION</span><span>SECURITY</span><span>STATE</span><span></span></div>
+            <div id="empty" class="empty hidden"><div>↗</div><h3>No proxy hosts</h3><p>Create a route to connect a domain to a service on your network.</p></div>
+            <div id="hosts"></div>
+          </article>
+          <article id="activity" class="panel glass activity-panel">
+            <div class="panel-head"><div><p class="overline">LIVE LOG</p><h2>Recent activity</h2></div><span class="live-dot"></span></div>
+            <div id="activity-list" class="activity-list"></div>
+          </article>
+        </div>
+
+        <section id="traffic-detail" class="traffic-detail hidden">
+          <div class="live-metrics">
+            <article class="metric glass"><div class="metric-head"><span>REQUESTS · 5 MIN</span><i class="cyan"><svg viewBox="0 0 24 24"><path d="M4 12h16M14 6l6 6-6 6"/></svg></i></div><strong id="live-request-count">0</strong><small>Recently observed requests</small></article>
+            <article class="metric glass"><div class="metric-head"><span>DATA · 5 MIN</span><i class="violet"><svg viewBox="0 0 24 24"><path d="M12 3v18m-5-5 5 5 5-5M7 8l5-5 5 5"/></svg></i></div><strong id="live-byte-count">0 B</strong><small>Response data transferred</small></article>
+            <article class="metric glass"><div class="metric-head"><span>SOURCES · 5 MIN</span><i class="green"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M6 20c.5-4 2.5-6 6-6s5.5 2 6 6"/></svg></i></div><strong id="live-source-count">0</strong><small>Unique client addresses</small></article>
+            <article class="metric glass"><div class="metric-head"><span>LIVE UPDATE</span><i class="amber"><svg viewBox="0 0 24 24"><path d="M4 12h3l2-6 4 12 2-6h5"/></svg></i></div><strong class="live-state"><span class="pulse"></span>LIVE</strong><small id="last-updated">Updating every 3 seconds</small></article>
+          </div>
+
+          <div class="traffic-analysis-grid">
+            <article class="panel glass live-chart-panel">
+              <div class="panel-head"><div><p class="overline">THROUGHPUT</p><h2>Requests per minute</h2></div><b class="window-label">LAST 60 MINUTES</b></div>
+              <div class="chart-wrap"><svg id="live-traffic-chart" role="img" aria-label="Requests per minute during the last hour"></svg></div>
+            </article>
+            <article class="panel glass breakdown-panel">
+              <div class="panel-head"><div><p class="overline">DESTINATIONS</p><h2>Where traffic is going</h2></div></div>
+              <div id="destination-list" class="breakdown-list"></div>
+            </article>
+            <article class="panel glass breakdown-panel">
+              <div class="panel-head"><div><p class="overline">CLIENTS</p><h2>Where traffic comes from</h2></div></div>
+              <div id="source-list" class="breakdown-list"></div>
+            </article>
+          </div>
+
+          <article class="panel glass stream-panel">
+            <div class="panel-head"><div><p class="overline">REQUEST STREAM</p><h2>Live request log</h2></div><div class="stream-controls"><input id="traffic-filter" placeholder="Filter host, IP or path"><button id="toggle-live" class="ghost">Pause</button></div></div>
+            <div class="stream-head"><span>TIME</span><span>SOURCE</span><span>REQUEST</span><span>DESTINATION</span><span>STATUS</span><span>LATENCY</span><span>SIZE</span></div>
+            <div id="live-stream" class="live-stream"></div>
+          </article>
+        </section>
+
+        <section id="users-detail" class="users-detail hidden">
+          <div class="user-summary glass">
+            <div><p class="overline">ACCESS CONTROL</p><h2>Dashboard users</h2><p>Operators can manage proxy hosts and certificates. Administrators can also manage accounts.</p></div>
+            <button id="add-user" class="primary">＋ Add user</button>
+          </div>
+          <article class="panel glass users-panel">
+            <div class="users-head"><span>USER</span><span>ROLE</span><span>STATUS</span><span>CREATED</span><span></span></div>
+            <div id="users-list"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="host-dialog">
+    <form id="host-form">
+      <div class="dialog-head"><div><p class="overline">ROUTE CONFIGURATION</p><h2 id="dialog-title">New proxy host</h2></div><button type="button" class="dialog-close close">×</button></div>
+      <input type="hidden" name="id">
+      <label>Domain names <small>Separate multiple names with spaces or commas</small><input name="domains" placeholder="photos.example.com" required></label>
+      <div class="upstream"><label>Scheme<select name="upstream_scheme"><option>http</option><option>https</option></select></label><label class="grow">Hostname or IP<input name="upstream_host" placeholder="192.168.1.50" required></label><label>Port<input name="upstream_port" type="number" min="1" max="65535" value="80" required></label></div>
+      <label class="switch-row"><span><strong>WebSocket support</strong><small>Enable connection upgrades for real-time applications.</small></span><input name="websocket" type="checkbox" checked><i></i></label>
+      <label class="switch-row"><span><strong>Route enabled</strong><small>Publish this route in the live NGINX configuration.</small></span><input name="enabled" type="checkbox" checked><i></i></label>
+      <p id="form-error" class="form-error"></p>
+      <div class="dialog-actions"><button type="button" class="ghost close">Cancel</button><button type="submit" class="primary">Save and apply</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="cert-dialog">
+    <form id="cert-form">
+      <div class="dialog-head"><div><p class="overline">LET'S ENCRYPT</p><h2>Enable HTTPS</h2></div><button type="button" class="dialog-close close-cert">×</button></div>
+      <input type="hidden" name="id"><div class="info-box">Public DNS must point to this gateway and inbound port 80 must be reachable before requesting a certificate.</div>
+      <label>Renewal email<input name="email" type="email" placeholder="you@example.com" required></label>
+      <p id="cert-error" class="form-error"></p>
+      <div class="dialog-actions"><button type="button" class="ghost close-cert">Cancel</button><button type="submit" class="primary">Request certificate</button></div>
+    </form>
+  </dialog>
+  <dialog id="user-dialog">
+    <form id="user-form">
+      <div class="dialog-head"><div><p class="overline">ACCESS CONTROL</p><h2 id="user-dialog-title">Add user</h2></div><button type="button" class="dialog-close close-user">×</button></div>
+      <input type="hidden" name="id">
+      <label>Username <small>Letters, numbers, dots, dashes and underscores</small><input name="username" minlength="3" maxlength="32" autocomplete="off" required></label>
+      <label>Role<select name="role"><option value="operator">Operator — manage proxy hosts</option><option value="admin">Administrator — full access</option></select></label>
+      <label>Password <small id="password-help">At least 12 characters</small><input name="password" type="password" minlength="12" autocomplete="new-password"></label>
+      <label class="switch-row"><span><strong>Account enabled</strong><small>Disabled users are immediately signed out.</small></span><input name="enabled" type="checkbox" checked><i></i></label>
+      <p id="user-form-error" class="form-error"></p>
+      <div class="dialog-actions"><button type="button" class="ghost close-user">Cancel</button><button type="submit" class="primary">Save user</button></div>
+    </form>
+  </dialog>
+  <div id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

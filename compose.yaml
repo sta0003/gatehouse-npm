@@ -1,0 +1,17 @@
+services:
+  gatehouse:
+    build: .
+    container_name: gatehouse
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # Bind the admin UI to the LAN interface instead of 0.0.0.0 if possible.
+      - "8080:8080"
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      TZ: Australia/Melbourne
+    volumes:
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
