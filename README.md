@@ -4,9 +4,11 @@ A small self-hosted control panel for routing domains and subdomains to services
 
 ## How traffic flows
 
-`Internet → router ports 80/443 → Gatehouse → local service`
+`Internet → router ports 80/443 or game port → Gatehouse → local service`
 
 TLS ends at Gatehouse. Your upstream service can use plain HTTP on the trusted LAN, or HTTPS if it already supports it.
+
+Minecraft Java routes can share the standard public TCP port 25565. Gatehouse reads the server domain from the Minecraft handshake and sends each domain to its configured LAN server and port—for example, `server1.example.com:25565 → 192.168.1.60:25566` and `server2.example.com:25565 → 192.168.1.61:25569`. Other games use raw TCP/UDP forwarding and normally require a unique public port.
 
 ## Start it
 
@@ -32,6 +34,8 @@ The installer will ask you to create the administrator password, build the conta
 5. Create public DNS `A`/`AAAA` records for each domain pointing to your public IP.
 6. Add a proxy host, verify HTTP works, then click **Enable HTTPS**.
 
+For Minecraft, also forward TCP port 25565 to Gatehouse. Create an `A`/`AAAA` record for every server domain, then add each one under **Game services** using the Minecraft Java routing mode. Players enter only the domain; the default port is used automatically.
+
 The helper also supports `start`, `stop`, `restart`, `rebuild`, `update`, `status`, and `logs`. Run `./gatehouse.sh help` for the complete list. It never deletes the persistent `data` or `letsencrypt` directories.
 
 Do not expose port 8080 to the public internet. Restrict it with your host firewall, a VPN, or a trusted management VLAN.
@@ -53,6 +57,8 @@ For LAN-only hostnames, split DNS, wildcard certificates, or networks behind CGN
 - Certificates are stored in `./letsencrypt` and persist across rebuilds.
 - The container checks for certificate renewals every 12 hours and reloads NGINX after a successful renewal.
 - Every route change writes a generated config, runs `nginx -t`, and only then reloads NGINX. If validation fails, the previous config is restored.
+- Minecraft hostname routes are applied live through the bundled `mc-router` sidecar.
+- Gatehouse can answer local DNS for configured domains. Set your router's DHCP DNS server to the Gatehouse LAN IP shown on the **Local DNS** page so LAN clients do not need internet or NAT loopback to resolve them.
 
 ## Backup and migration
 

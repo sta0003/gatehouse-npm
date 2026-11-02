@@ -3,15 +3,31 @@ services:
     build: .
     container_name: gatehouse
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      # Bind the admin UI to the LAN interface instead of 0.0.0.0 if possible.
-      - "8080:8080"
+    # Host networking lets NGINX bind arbitrary TCP/UDP game ports without
+    # rebuilding this file for every service. Linux hosts only.
+    network_mode: host
     environment:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      GATEHOUSE_LAN_IP: ${GATEHOUSE_LAN_IP:?Set GATEHOUSE_LAN_IP in .env}
       TZ: Australia/Melbourne
     volumes:
       - ./data:/data
       - ./letsencrypt:/etc/letsencrypt
+
+  mc-router:
+    image: itzg/mc-router:1.52.0
+    container_name: gatehouse-mc-router
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      ROUTES_CONFIG: /config/mc-router-routes.json
+      ROUTES_CONFIG_WATCH: "true"
+      API_BINDING: 127.0.0.1:25564
+      PORT: 25565
+      TZ: Australia/Melbourne
+    volumes:
+      - ./data:/config:ro
+    depends_on:
+      gatehouse:
+        condition: service_healthy

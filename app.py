@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import shutil
 import sqlite3
 import ssl
@@ -23,12 +24,19 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib import error as urllib_error, request as urllib_request
+from urllib.parse import quote, urlparse
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "proxy.db"
 NGINX_OUTPUT = Path(os.environ.get("NGINX_OUTPUT", "/etc/nginx/conf.d/proxy-hosts.conf"))
+STREAM_OUTPUT = Path(os.environ.get("STREAM_OUTPUT", "/etc/nginx/stream-conf.d/game-services.conf"))
+MC_ROUTER_OUTPUT = Path(os.environ.get("MC_ROUTER_OUTPUT", "/data/mc-router-routes.json"))
+DNS_HOSTS = Path(os.environ.get("DNS_HOSTS", "/data/local-dns-hosts"))
+DNSMASQ_PID = Path(os.environ.get("DNSMASQ_PID", "/run/gatehouse-dnsmasq.pid"))
+GATEHOUSE_LAN_IP = os.environ.get("GATEHOUSE_LAN_IP", "").strip()
+MC_ROUTER_API = os.environ.get("MC_ROUTER_API", "http://127.0.0.1:25564").rstrip("/")
 WEB_ROOT = Path(__file__).with_name("web")
 CERT_ROOT = Path(os.environ.get("CERT_ROOT", "/etc/letsencrypt/live"))
 CERT_STORAGE_ROOT = Path(os.environ.get("CERT_STORAGE_ROOT", str(CERT_ROOT.parent)))
@@ -106,6 +114,23 @@ def initialize() -> None:
                 created_at INTEGER NOT NULL
             )"""
         )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS stream_routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'port' CHECK (kind IN ('port', 'minecraft')),
+                listen_port INTEGER NOT NULL,
+                protocol TEXT NOT NULL CHECK (protocol IN ('tcp', 'udp', 'both')),
+                upstream_host TEXT NOT NULL,
+                upstream_port INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        stream_columns = {row["name"] for row in connection.execute("PRAGMA table_info(stream_routes)")}
+        if "kind" not in stream_columns:
+            connection.execute("ALTER TABLE stream_routes ADD COLUMN kind TEXT NOT NULL DEFAULT 'port' CHECK (kind IN ('port', 'minecraft'))")
         if not connection.execute("SELECT 1 FROM users LIMIT 1").fetchone():
             connection.execute(
                 "INSERT INTO users (username, password_hash, role, enabled, created_at) VALUES (?, ?, 'admin', 1, ?)",
@@ -174,6 +199,71 @@ def validate_payload(payload: dict) -> dict:
         "allowlist": "\n".join(allowlist),
         "blocklist": "\n".join(blocklist),
     }
+
+
+def validate_stream_payload(payload: dict) -> dict:
+    name = str(payload.get("name", "")).strip()
+    if not 1 <= len(name) <= 64 or any(char in name for char in "\n\r\t<>"):
+        raise ValueError("Service name must be between 1 and 64 characters")
+    domain = normalize_domains(str(payload.get("domain", "")))
+    if len(domain) != 1:
+        raise ValueError("Enter one domain name for this game service")
+    kind = str(payload.get("kind", "minecraft")).lower()
+    if kind not in {"port", "minecraft"}:
+        raise ValueError("Routing mode must be Minecraft Java or raw TCP/UDP")
+    protocol = "tcp" if kind == "minecraft" else str(payload.get("protocol", "tcp")).lower()
+    if protocol not in {"tcp", "udp", "both"}:
+        raise ValueError("Protocol must be TCP, UDP, or both")
+    host = str(payload.get("upstream_host", "")).strip()
+    if not host or any(char in host for char in " /;{}$\n\r\t"):
+        raise ValueError("Enter a valid upstream hostname or IP address")
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", host):
+            raise ValueError("Enter a valid upstream hostname or IP address") from None
+    try:
+        listen_port = 25565 if kind == "minecraft" else int(payload.get("listen_port"))
+        upstream_port = int(payload.get("upstream_port"))
+    except (TypeError, ValueError):
+        raise ValueError("Source and destination ports must be numbers") from None
+    if not 1 <= listen_port <= 65535 or not 1 <= upstream_port <= 65535:
+        raise ValueError("Ports must be between 1 and 65535")
+    if listen_port in {53, 80, 443, 8080}:
+        raise ValueError(f"Port {listen_port} is reserved by Gatehouse")
+    return {
+        "name": name, "domain": domain[0], "kind": kind, "listen_port": listen_port,
+        "protocol": protocol, "upstream_host": host,
+        "upstream_port": upstream_port, "enabled": int(bool(payload.get("enabled", True))),
+    }
+
+
+def ensure_stream_route_available(connection: sqlite3.Connection, values: dict, exclude_id: int | None = None) -> None:
+    kind, listen_port, protocol = values["kind"], values["listen_port"], values["protocol"]
+    if kind == "minecraft":
+        duplicate = connection.execute(
+            "SELECT id FROM stream_routes WHERE kind = 'minecraft' AND domain = ?", (values["domain"],)
+        ).fetchone()
+        if duplicate and duplicate["id"] != exclude_id:
+            raise ValueError("That Minecraft domain is already assigned")
+        raw_tcp = connection.execute(
+            "SELECT id FROM stream_routes WHERE kind = 'port' AND listen_port = 25565 AND protocol IN ('tcp', 'both')"
+        ).fetchall()
+        if any(row["id"] != exclude_id for row in raw_tcp):
+            raise ValueError("Port 25565/TCP is already assigned to a raw port route")
+        return
+    if listen_port == 25565 and protocol in {"tcp", "both"}:
+        minecraft = connection.execute("SELECT id FROM stream_routes WHERE kind = 'minecraft'").fetchall()
+        if any(row["id"] != exclude_id for row in minecraft):
+            raise ValueError("Port 25565/TCP is reserved by Minecraft hostname routing")
+    rows = connection.execute(
+        "SELECT id, protocol FROM stream_routes WHERE kind = 'port' AND listen_port = ?", (listen_port,)
+    ).fetchall()
+    requested = {"tcp", "udp"} if protocol == "both" else {protocol}
+    for row in rows:
+        existing = {"tcp", "udp"} if row["protocol"] == "both" else {row["protocol"]}
+        if row["id"] != exclude_id and requested.intersection(existing):
+            raise ValueError(f"Port {listen_port}/{sorted(requested.intersection(existing))[0].upper()} is already assigned")
 
 
 def validate_user_payload(payload: dict, require_password: bool = True) -> dict:
@@ -328,34 +418,170 @@ server {
     return header + "\n".join(host_config(row) for row in rows)
 
 
+def stream_route_config(row: sqlite3.Row) -> str:
+    host = row["upstream_host"]
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    upstream = f'{host}:{row["upstream_port"]}'
+    blocks = []
+    if row["protocol"] in {"tcp", "both"}:
+        blocks.append(f"""# {row['name']} · {row['domain']} · TCP
+server {{
+    listen {row['listen_port']};
+    listen [::]:{row['listen_port']};
+    proxy_connect_timeout 10s;
+    proxy_timeout 24h;
+    proxy_pass {upstream};
+}}""")
+    if row["protocol"] in {"udp", "both"}:
+        blocks.append(f"""# {row['name']} · {row['domain']} · UDP
+server {{
+    listen {row['listen_port']} udp reuseport;
+    listen [::]:{row['listen_port']} udp reuseport;
+    proxy_timeout 10m;
+    proxy_responses 0;
+    proxy_pass {upstream};
+}}""")
+    return "\n\n".join(blocks)
+
+
+def render_stream_config(connection: sqlite3.Connection | None = None) -> str:
+    owns_connection = connection is None
+    connection = connection or db()
+    rows = connection.execute("SELECT * FROM stream_routes WHERE enabled = 1 AND kind = 'port' ORDER BY listen_port, id").fetchall()
+    if owns_connection:
+        connection.close()
+    header = "# Generated by Gatehouse. TCP/UDP services are selected by source port.\n"
+    return header + "\n\n".join(stream_route_config(row) for row in rows) + "\n"
+
+
+def render_mc_router_config(connection: sqlite3.Connection | None = None) -> str:
+    owns_connection = connection is None
+    connection = connection or db()
+    rows = connection.execute(
+        "SELECT domain, upstream_host, upstream_port FROM stream_routes WHERE enabled = 1 AND kind = 'minecraft' ORDER BY domain"
+    ).fetchall()
+    if owns_connection:
+        connection.close()
+    mappings = {row["domain"]: f'{row["upstream_host"]}:{row["upstream_port"]}' for row in rows}
+    return json.dumps({"default-server": None, "mappings": mappings}, indent=2) + "\n"
+
+
+def local_dns_address() -> str | None:
+    try:
+        address = ipaddress.ip_address(GATEHOUSE_LAN_IP)
+        if address.is_unspecified or address.is_loopback or address.is_multicast:
+            return None
+        return address.compressed
+    except ValueError:
+        return None
+
+
+def local_dns_records(connection: sqlite3.Connection | None = None) -> list[dict]:
+    owns_connection = connection is None
+    connection = connection or db()
+    records: dict[str, str] = {}
+    for row in connection.execute("SELECT domains FROM proxy_hosts WHERE enabled = 1"):
+        for domain in row["domains"].split():
+            records[domain] = "Web proxy"
+    for row in connection.execute("SELECT domain FROM stream_routes WHERE enabled = 1"):
+        records.setdefault(row["domain"], "Game / TCP service")
+    if owns_connection:
+        connection.close()
+    return [{"domain": domain, "type": records[domain]} for domain in sorted(records)]
+
+
+def render_dns_hosts(connection: sqlite3.Connection | None = None) -> str:
+    address = local_dns_address()
+    records = local_dns_records(connection)
+    lines = ["# Generated by Gatehouse. Configure router DHCP to advertise this DNS server."]
+    if not address:
+        lines.append("# GATEHOUSE_LAN_IP is not configured; no local records are active.")
+    else:
+        lines.extend(f"{address} {record['domain']}" for record in records)
+    return "\n".join(lines) + "\n"
+
+
+def reload_dnsmasq() -> None:
+    try:
+        process_id = int(DNSMASQ_PID.read_text().strip())
+        os.kill(process_id, signal.SIGHUP)
+    except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+        pass
+
+
+def sync_mc_router(connection: sqlite3.Connection | None = None) -> None:
+    owns_connection = connection is None
+    connection = connection or db()
+    rows = connection.execute(
+        "SELECT domain, upstream_host, upstream_port FROM stream_routes WHERE enabled = 1 AND kind = 'minecraft'"
+    ).fetchall()
+    desired = {row["domain"]: f'{row["upstream_host"]}:{row["upstream_port"]}' for row in rows}
+    if owns_connection:
+        connection.close()
+    try:
+        list_request = urllib_request.Request(f"{MC_ROUTER_API}/routes", headers={"Accept": "application/json"})
+        with urllib_request.urlopen(list_request, timeout=1) as response:
+            current_payload = json.load(response)
+        current = {domain: details.get("backend") for domain, details in current_payload.items()}
+        for domain in current.keys() - desired.keys():
+            delete_request = urllib_request.Request(f"{MC_ROUTER_API}/routes/{quote(domain, safe='')}", method="DELETE")
+            urllib_request.urlopen(delete_request, timeout=1).close()
+        for domain, backend in desired.items():
+            if current.get(domain) == backend:
+                continue
+            payload = json.dumps({"serverAddress": domain, "backend": backend}).encode()
+            update_request = urllib_request.Request(
+                f"{MC_ROUTER_API}/routes", data=payload, method="POST", headers={"Content-Type": "application/json"}
+            )
+            urllib_request.urlopen(update_request, timeout=1).close()
+    except (OSError, ValueError, json.JSONDecodeError, urllib_error.HTTPError):
+        # The persisted route file is loaded when the sidecar starts. Its API can
+        # briefly be unavailable while Docker is starting or restarting it.
+        pass
+
+
 def run_nginx(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["nginx", *args], text=True, capture_output=True, timeout=20)
 
 
 def render_and_reload(reload_nginx: bool = True, connection: sqlite3.Connection | None = None) -> None:
-    NGINX_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    previous = NGINX_OUTPUT.read_text() if NGINX_OUTPUT.exists() else None
-    content = render_config(connection)
-    with tempfile.NamedTemporaryFile("w", dir=NGINX_OUTPUT.parent, delete=False) as temporary:
-        temporary.write(content)
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(NGINX_OUTPUT)
+    outputs = {
+        NGINX_OUTPUT: render_config(connection),
+        STREAM_OUTPUT: render_stream_config(connection),
+        MC_ROUTER_OUTPUT: render_mc_router_config(connection),
+        DNS_HOSTS: render_dns_hosts(connection),
+    }
+    previous = {path: path.read_text() if path.exists() else None for path in outputs}
+    for path, content in outputs.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as temporary:
+            temporary.write(content)
+            temporary_path = Path(temporary.name)
+        temporary_path.chmod(0o644)
+        temporary_path.replace(path)
     if not reload_nginx or not shutil_which("nginx"):
+        reload_dnsmasq()
+        sync_mc_router(connection)
         return
     check = run_nginx("-t")
     if check.returncode:
-        if previous is None:
-            NGINX_OUTPUT.unlink(missing_ok=True)
-        else:
-            NGINX_OUTPUT.write_text(previous)
+        for path, old_content in previous.items():
+            if old_content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(old_content)
         raise RuntimeError(check.stderr.strip() or "NGINX configuration validation failed")
     reload_result = run_nginx("-s", "reload")
     if reload_result.returncode:
-        if previous is None:
-            NGINX_OUTPUT.unlink(missing_ok=True)
-        else:
-            NGINX_OUTPUT.write_text(previous)
+        for path, old_content in previous.items():
+            if old_content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(old_content)
         raise RuntimeError(reload_result.stderr.strip() or "NGINX reload failed")
+    reload_dnsmasq()
+    sync_mc_router(connection)
 
 
 def ensure_domains_available(connection: sqlite3.Connection, domains: str, exclude_id: int | None = None) -> None:
@@ -517,11 +743,14 @@ def create_backup(passphrase: object) -> tuple[Path, dict]:
             with sqlite3.connect(stage / "proxy.db") as connection:
                 route_count = connection.execute("SELECT COUNT(*) FROM proxy_hosts").fetchone()[0]
                 user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                stream_count = connection.execute("SELECT COUNT(*) FROM stream_routes").fetchone()[0] if "stream_routes" in tables else 0
             certificate_count = sum(1 for path in CERT_ROOT.glob("*") if path.is_dir() and (path / "fullchain.pem").exists()) if CERT_ROOT.exists() else 0
             manifest = {
                 "format": "gatehouse-backup", "version": 1,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "routes": route_count, "users": user_count, "certificates": certificate_count,
+                "routes": route_count, "stream_routes": stream_count,
+                "users": user_count, "certificates": certificate_count,
             }
             (stage / "manifest.json").write_text(json.dumps(manifest, indent=2))
             certificate_stage = stage / "letsencrypt"
@@ -766,11 +995,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self.require_admin(): return
             with db() as connection:
                 route_count = connection.execute("SELECT COUNT(*) FROM proxy_hosts").fetchone()[0]
+                stream_count = connection.execute("SELECT COUNT(*) FROM stream_routes").fetchone()[0]
                 user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             certificate_count = sum(1 for item in CERT_ROOT.glob("*") if item.is_dir() and (item / "fullchain.pem").exists()) if CERT_ROOT.exists() else 0
             self.json_response(200, {
-                "routes": route_count, "users": user_count, "certificates": certificate_count,
+                "routes": route_count, "stream_routes": stream_count, "users": user_count, "certificates": certificate_count,
                 "encrypted": True, "max_restore_bytes": MAX_BACKUP_BYTES,
+            }); return
+        if path == "/api/streams":
+            if not self.require_auth(): return
+            with db() as connection:
+                rows = [dict(row) for row in connection.execute("SELECT * FROM stream_routes ORDER BY listen_port, id")]
+            for row in rows:
+                row["enabled"] = bool(row["enabled"])
+            self.json_response(200, rows); return
+        if path == "/api/local-dns":
+            if not self.require_auth(): return
+            address = local_dns_address()
+            records = local_dns_records()
+            self.json_response(200, {
+                "enabled": bool(address), "address": address, "port": 53,
+                "records": records, "record_count": len(records),
             }); return
         if path == "/api/hosts":
             if not self.require_auth(): return
@@ -863,6 +1108,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     connection.close()
                 self.json_response(201, {"id": cursor.lastrowid})
                 return
+            if path == "/api/streams":
+                values = validate_stream_payload(payload)
+                connection = db()
+                try:
+                    ensure_stream_route_available(connection, values)
+                    cursor = connection.execute(
+                        "INSERT INTO stream_routes (name, domain, kind, listen_port, protocol, upstream_host, upstream_port, enabled, created_at) VALUES (:name,:domain,:kind,:listen_port,:protocol,:upstream_host,:upstream_port,:enabled,:created_at)",
+                        values | {"created_at": int(time.time())},
+                    )
+                    render_and_reload(connection=connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback(); raise
+                finally:
+                    connection.close()
+                self.json_response(201, {"id": cursor.lastrowid}); return
             if path == "/api/users":
                 if not self.require_admin(): return
                 values = validate_user_payload(payload) | {"created_at": int(time.time())}
@@ -909,6 +1170,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.json_response(409, {"error": "That username is already in use"}); return
             except (ValueError, json.JSONDecodeError) as error:
                 self.json_response(400, {"error": str(error)}); return
+        stream_match = re.fullmatch(r"/api/streams/(\d+)", path)
+        if stream_match:
+            try:
+                values = validate_stream_payload(self.payload()) | {"id": int(stream_match.group(1))}
+                connection = db()
+                try:
+                    ensure_stream_route_available(connection, values, values["id"])
+                    cursor = connection.execute(
+                        "UPDATE stream_routes SET name=:name, domain=:domain, kind=:kind, listen_port=:listen_port, protocol=:protocol, upstream_host=:upstream_host, upstream_port=:upstream_port, enabled=:enabled WHERE id=:id", values
+                    )
+                    if not cursor.rowcount: raise ValueError("Game service not found")
+                    render_and_reload(connection=connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback(); raise
+                finally:
+                    connection.close()
+                self.json_response(200, {"ok": True}); return
+            except (ValueError, json.JSONDecodeError, sqlite3.IntegrityError) as error:
+                self.json_response(400, {"error": str(error)}); return
+            except RuntimeError as error:
+                self.json_response(500, {"error": str(error)}); return
         match = re.fullmatch(r"/api/hosts/(\d+)", path)
         if not match:
             self.json_response(404, {"error": "Not found"}); return
@@ -951,6 +1234,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.json_response(200, {"ok": True}); return
             except ValueError as error:
                 self.json_response(400, {"error": str(error)}); return
+        stream_match = re.fullmatch(r"/api/streams/(\d+)", path)
+        if stream_match:
+            connection = db()
+            try:
+                connection.execute("DELETE FROM stream_routes WHERE id = ?", (int(stream_match.group(1)),))
+                render_and_reload(connection=connection)
+                connection.commit()
+                self.json_response(200, {"ok": True}); return
+            except Exception as error:
+                connection.rollback()
+                self.json_response(500, {"error": str(error)}); return
+            finally:
+                connection.close()
         match = re.fullmatch(r"/api/hosts/(\d+)", path)
         if not match:
             self.json_response(404, {"error": "Not found"}); return

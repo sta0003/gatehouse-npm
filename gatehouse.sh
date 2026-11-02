@@ -66,12 +66,28 @@ write_password() {
 }
 
 ensure_environment() {
+  local detected_ip configured_ip
   mkdir -p data letsencrypt
+  if [[ ! -f data/mc-router-routes.json ]]; then
+    printf '{"default-server":null,"mappings":{}}\n' > data/mc-router-routes.json
+  fi
+  chmod 644 data/mc-router-routes.json
   if [[ ! -f .env ]] || grep -q '^ADMIN_PASSWORD=replace-this-' .env; then
     write_password
   else
     chmod 600 .env
     grep -q '^ADMIN_PASSWORD=.' .env || fail ".env does not contain ADMIN_PASSWORD."
+  fi
+  configured_ip="$(sed -n 's/^GATEHOUSE_LAN_IP=//p' .env | tail -n 1)"
+  if [[ -z "$configured_ip" ]]; then
+    detected_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+(\.[0-9]+){3}$' || true)"
+    if [[ -z "$detected_ip" && -t 0 ]]; then
+      read -r -p 'Gatehouse LAN IP address: ' detected_ip
+    fi
+    [[ "$detected_ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || fail "Could not detect a LAN IPv4 address. Add GATEHOUSE_LAN_IP=192.168.x.x to .env."
+    printf '\nGATEHOUSE_LAN_IP=%s\n' "$detected_ip" >> .env
+    chmod 600 .env
+    info "Local DNS will listen on $detected_ip:53."
   fi
 }
 
@@ -88,6 +104,13 @@ wait_for_health() {
     docker compose logs --tail 40 gatehouse
     fail "Gatehouse did not become healthy (state: ${state:-unknown})."
   fi
+  for _ in {1..20}; do
+    state="$(docker inspect --format '{{.State.Status}}' gatehouse-mc-router 2>/dev/null || true)"
+    [[ "$state" == 'running' ]] && return
+    sleep 1
+  done
+  docker compose logs --tail 40 mc-router
+  fail "Minecraft router did not start (state: ${state:-unknown})."
 }
 
 show_address() {
@@ -101,7 +124,7 @@ show_address() {
   printf 'Username:  admin\n'
   printf 'Data:      %s/data\n' "$SCRIPT_DIR"
   printf 'TLS state: %s/letsencrypt\n\n' "$SCRIPT_DIR"
-  warn "Keep port 8080 private. Only forward ports 80 and 443 from your router."
+  warn "Keep ports 53 and 8080 private. Forward 80/443, TCP 25565 for Minecraft, and only other game ports you configure."
 }
 
 install_gatehouse() {

@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/mobile.css">
   <link rel="stylesheet" href="/certificates.css">
   <link rel="stylesheet" href="/backups.css">
+  <link rel="stylesheet" href="/services.css">
 </head>
 <body>
   <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div><div class="noise"></div>
@@ -38,6 +39,8 @@
         <a href="#routes" data-view="routes"><svg viewBox="0 0 24 24"><path d="M5 5h5v5H5V5Zm9 9h5v5h-5v-5ZM7.5 10v3.5A3.5 3.5 0 0 0 11 17h3m0-10h-4"/><circle cx="17" cy="7" r="3"/></svg><span>Proxy hosts</span><b id="nav-route-count">0</b></a>
         <a href="#certificates" data-view="certificates"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg><span>Certificates</span></a>
         <a href="#activity" data-view="activity"><svg viewBox="0 0 24 24"><path d="M4 12h3l2-6 4 12 2-6h5"/></svg><span>Live traffic</span></a>
+        <a href="#services" data-view="services"><svg viewBox="0 0 24 24"><path d="M5 7h14v10H5z"/><path d="M8 11h3m-1.5-1.5v3M15 10v.1m2 1.9v.1"/></svg><span>Game services</span><b id="nav-service-count">0</b></a>
+        <a href="#dns" data-view="dns"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg><span>Local DNS</span></a>
         <a id="users-nav" href="#users" data-view="users" class="hidden"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c.4-4 2.4-6 6-6s5.6 2 6 6m1-10h5m-2.5-2.5v5"/></svg><span>Users</span></a>
         <a id="backups-nav" href="#backups" data-view="backups" class="hidden"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 5v5h8V5M8 19v-5h8v5"/></svg><span>Backup & restore</span></a>
       </nav>
@@ -132,6 +135,38 @@
           </article>
         </section>
 
+        <section id="services-detail" class="services-detail hidden">
+          <div class="service-summary glass">
+            <div><p class="overline">GAME GATEWAY</p><h2>Game and port services</h2><p>Route Minecraft by domain, or forward a dedicated TCP/UDP port.</p></div>
+            <button id="add-service" class="primary">＋ New game service</button>
+          </div>
+          <div class="service-notice"><strong>Minecraft hostname routing</strong><span>Multiple Java servers can share public TCP port 25565. Other games normally need a unique external port and matching router/NAT rule.</span></div>
+          <article class="panel glass services-panel">
+            <div class="services-head"><span>SERVICE / DOMAIN</span><span>PUBLIC LISTENER</span><span>DESTINATION</span><span>STATE</span><span></span></div>
+            <div id="services-empty" class="empty hidden"><div>⌁</div><h3>No game services</h3><p>Add Minecraft, Bedrock, voice, or another TCP/UDP service.</p></div>
+            <div id="services-list"></div>
+          </article>
+        </section>
+
+        <section id="dns-detail" class="dns-detail hidden">
+          <div class="dns-hero glass">
+            <div class="dns-status-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg></div>
+            <div><p class="overline">SPLIT DNS</p><h2>Local domain resolution</h2><p>Gatehouse answers configured domains with its LAN address, so local traffic stays inside your network.</p></div>
+            <span id="dns-state" class="state">CHECKING</span>
+          </div>
+          <div class="dns-grid">
+            <article class="panel glass dns-setup">
+              <div class="panel-head"><div><p class="overline">ROUTER SETUP</p><h2>Advertise Gatehouse as DNS</h2></div></div>
+              <ol><li><b>1</b><span>Open your router or DHCP server settings.</span></li><li><b>2</b><span>Set the LAN/DHCP DNS server to <code id="dns-address">—</code>.</span></li><li><b>3</b><span>Renew client DHCP leases or reconnect devices.</span></li></ol>
+              <div class="dns-warning">Do not forward port 53 from the internet. This DNS service is intended only for your LAN.</div>
+            </article>
+            <article class="panel glass dns-records-panel">
+              <div class="panel-head"><div><p class="overline">AUTOMATIC RECORDS</p><h2>Published local domains</h2></div><span id="dns-record-count" class="dns-count">0 records</span></div>
+              <div id="dns-records" class="dns-records"></div>
+            </article>
+          </div>
+        </section>
+
         <section id="users-detail" class="users-detail hidden">
           <div class="user-summary glass">
             <div><p class="overline">ACCESS CONTROL</p><h2>Dashboard users</h2><p>Operators can manage proxy hosts and certificates. Administrators can also manage accounts.</p></div>
@@ -146,7 +181,7 @@
         <section id="backups-detail" class="backups-detail hidden">
           <div class="backup-summary glass">
             <div><p class="overline">DISASTER RECOVERY</p><h2>Portable configuration backups</h2><p>Move Gatehouse routes, dashboard users, access rules, and certificates to a fresh installation.</p></div>
-            <div class="backup-counts"><span><strong id="backup-route-count">0</strong>routes</span><span><strong id="backup-user-count">0</strong>users</span><span><strong id="backup-cert-count">0</strong>certificates</span></div>
+            <div class="backup-counts"><span><strong id="backup-route-count">0</strong>web routes</span><span><strong id="backup-service-count">0</strong>game services</span><span><strong id="backup-user-count">0</strong>users</span><span><strong id="backup-cert-count">0</strong>certificates</span></div>
           </div>
           <div class="backup-grid">
             <article class="panel glass backup-card">
@@ -171,7 +206,7 @@
               </form>
             </article>
           </div>
-          <div class="backup-footnote glass"><strong>Included</strong><span>Proxy hosts · IP allow/block lists · users and password hashes · Let's Encrypt certificates and renewal accounts</span><strong>Excluded</strong><span>Traffic history · generated NGINX files · <code>.env</code> and deployment-specific settings</span></div>
+          <div class="backup-footnote glass"><strong>Included</strong><span>Proxy hosts · TCP/UDP services · IP rules · users and password hashes · Let's Encrypt state</span><strong>Excluded</strong><span>Traffic history · generated NGINX files · <code>.env</code> and deployment-specific settings</span></div>
         </section>
       </section>
     </main>
@@ -192,6 +227,26 @@
       <label class="switch-row"><span><strong>Route enabled</strong><small>Publish this route in the live NGINX configuration.</small></span><input name="enabled" type="checkbox" checked><i></i></label>
       <p id="form-error" class="form-error"></p>
       <div class="dialog-actions"><button type="button" class="ghost close">Cancel</button><button type="submit" class="primary">Save and apply</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="service-dialog">
+    <form id="service-form">
+      <div class="dialog-head"><div><p class="overline">TCP / UDP ROUTE</p><h2 id="service-dialog-title">New game service</h2></div><button type="button" class="dialog-close close-service">×</button></div>
+      <input type="hidden" name="id">
+      <label>Service name <small>A friendly dashboard label</small><input name="name" maxlength="64" placeholder="Minecraft survival" required></label>
+      <label>Domain name <small>Used for public DNS and the automatic local DNS record</small><input name="domain" placeholder="minecraft.example.com" required></label>
+      <label>Routing mode<select name="kind"><option value="minecraft">Minecraft Java — domain on port 25565</option><option value="port">Raw TCP / UDP — dedicated port</option></select></label>
+      <div id="raw-service-fields" class="service-port-grid hidden">
+        <label>Protocol<select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></label>
+        <label>Public source port<input name="listen_port" type="number" min="1" max="65535" value="25565" required></label>
+      </div>
+      <div class="upstream"><label class="grow">Internal server IP / host<input name="upstream_host" placeholder="192.168.1.60" required></label><label>Destination port<input name="upstream_port" type="number" min="1" max="65535" value="25565" required></label></div>
+      <div id="minecraft-service-info" class="info-box">Forward TCP 25565 from your router to Gatehouse once. The Minecraft domain selects this internal server and port.</div>
+      <div id="raw-service-info" class="info-box hidden">Create a matching router port-forward from this public source port to the same port on Gatehouse.</div>
+      <label class="switch-row"><span><strong>Service enabled</strong><small>Publish this route to the live game gateway.</small></span><input name="enabled" type="checkbox" checked><i></i></label>
+      <p id="service-form-error" class="form-error"></p>
+      <div class="dialog-actions"><button type="button" class="ghost close-service">Cancel</button><button type="submit" class="primary">Save and apply</button></div>
     </form>
   </dialog>
 

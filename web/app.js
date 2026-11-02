@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-let hosts = [], stats = null, users = [], backupInfo = null, me = null, currentView = 'overview', livePaused = false;
+let hosts = [], services = [], stats = null, users = [], backupInfo = null, localDns = null, me = null, currentView = 'overview', livePaused = false;
 
 async function api(path, options={}) {
   const response = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options});
@@ -24,20 +24,20 @@ async function boot(){
   await refreshAll();
 }
 async function refreshAll(){
-  const results=await Promise.all([api('/api/hosts'),api('/api/stats'),me?.role==='admin'?api('/api/users'):Promise.resolve([]),me?.role==='admin'?api('/api/backups/info'):Promise.resolve(null)]);
-  [hosts,stats,users,backupInfo]=results;
-  renderHosts();renderStats();renderUsers();renderCertificates();renderBackupInfo();
+  const results=await Promise.all([api('/api/hosts'),api('/api/streams'),api('/api/local-dns'),api('/api/stats'),me?.role==='admin'?api('/api/users'):Promise.resolve([]),me?.role==='admin'?api('/api/backups/info'):Promise.resolve(null)]);
+  [hosts,services,localDns,stats,users,backupInfo]=results;
+  renderHosts();renderServices();renderLocalDns();renderStats();renderUsers();renderCertificates();renderBackupInfo();
 }
 async function refreshStats(){try{stats=await api('/api/stats');renderStats()}catch(_) {}}
 
 function setView(view){
-  if(!['overview','routes','certificates','activity','users','backups'].includes(view) || (['users','backups'].includes(view)&&me?.role!=='admin')) view='overview';
+  if(!['overview','routes','certificates','activity','services','dns','users','backups'].includes(view) || (['users','backups'].includes(view)&&me?.role!=='admin')) view='overview';
   currentView=view;
-  const copy={overview:['OVERVIEW','Network overview'],routes:['PROXY HOSTS','Proxy hosts'],certificates:['CERTIFICATES','TLS certificates'],activity:['LIVE TRAFFIC','Live traffic'],users:['USERS','User management'],backups:['BACKUP & RESTORE','Disaster recovery']}[view];
+  const copy={overview:['OVERVIEW','Network overview'],routes:['PROXY HOSTS','Proxy hosts'],certificates:['CERTIFICATES','TLS certificates'],activity:['LIVE TRAFFIC','Live traffic'],services:['GAME SERVICES','TCP / UDP services'],dns:['LOCAL DNS','Local domain resolution'],users:['USERS','User management'],backups:['BACKUP & RESTORE','Disaster recovery']}[view];
   $('#view-crumb').textContent=copy[0];$('#view-title').textContent=copy[1];
   $('#metrics-section').classList.toggle('hidden',view!=='overview');
   $('#charts-section').classList.toggle('hidden',view!=='overview');
-  $('#lower-section').classList.toggle('hidden',['activity','users','certificates','backups'].includes(view));
+  $('#lower-section').classList.toggle('hidden',['activity','services','dns','users','certificates','backups'].includes(view));
   $('#lower-section').classList.toggle('single',view!=='overview');
   $('#routes').classList.toggle('hidden',!['overview','routes'].includes(view));
   $('#activity').classList.toggle('hidden',view!=='overview');
@@ -45,7 +45,9 @@ function setView(view){
   $('#certificates-detail').classList.toggle('hidden',view!=='certificates');
   $('#users-detail').classList.toggle('hidden',view!=='users');
   $('#backups-detail').classList.toggle('hidden',view!=='backups');
-  $('#add-host').classList.toggle('hidden',['users','backups'].includes(view));
+  $('#services-detail').classList.toggle('hidden',view!=='services');
+  $('#dns-detail').classList.toggle('hidden',view!=='dns');
+  $('#add-host').classList.toggle('hidden',['services','dns','users','backups'].includes(view));
   $('#route-kicker').textContent=view==='certificates'?'TLS MANAGEMENT':'ROUTING';
   $('#route-title').textContent=view==='certificates'?'Certificates':'Proxy hosts';
   $('#search').placeholder=view==='certificates'?'Search certificates':'Search routes';
@@ -56,9 +58,26 @@ function setView(view){
 function renderBackupInfo(){
   if(!backupInfo)return;
   $('#backup-route-count').textContent=backupInfo.routes;
+  $('#backup-service-count').textContent=backupInfo.stream_routes||0;
   $('#backup-user-count').textContent=backupInfo.users;
   $('#backup-cert-count').textContent=backupInfo.certificates;
 }
+
+function renderServices(){
+  $('#nav-service-count').textContent=services.length;
+  $('#services-empty').classList.toggle('hidden',services.length!==0);
+  $('#services-list').innerHTML=services.map(service=>`<div class="service-row"><div class="service-identity"><strong>${esc(service.name)}</strong><small>${esc(service.domain)}</small></div><span class="listener-badge">${service.kind==='minecraft'?'MINECRAFT':esc(service.protocol.toUpperCase())} :${service.listen_port}</span><div class="service-target"><strong>${esc(service.upstream_host)}:${service.upstream_port}</strong><small>Internal destination</small></div><span class="state ${service.enabled?'on':''}">${service.enabled?'ACTIVE':'PAUSED'}</span><div class="service-actions"><button class="toggle-service" data-id="${service.id}" aria-label="${service.enabled?'Disable':'Enable'} service"><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M7.1 6.4a8 8 0 1 0 9.8 0"/></svg></button><button class="edit-service" data-id="${service.id}" aria-label="Edit service"><svg viewBox="0 0 24 24"><path d="m14 6 4 4M5 19l3.5-.7L19 7.8 16.2 5 5.7 15.5 5 19Z"/></svg></button><button class="delete-service" data-id="${service.id}" aria-label="Delete service"><svg viewBox="0 0 24 24"><path d="M5 7h14m-9-3h4m-7 3 1 13h8l1-13M10 11v5m4-5v5"/></svg></button></div></div>`).join('');
+}
+function renderLocalDns(){
+  if(!localDns)return;
+  $('#dns-state').textContent=localDns.enabled?'ONLINE':'NOT CONFIGURED';$('#dns-state').classList.toggle('on',localDns.enabled);
+  $('#dns-address').textContent=localDns.address||'Set GATEHOUSE_LAN_IP in .env';
+  $('#dns-record-count').textContent=`${localDns.record_count} record${localDns.record_count===1?'':'s'}`;
+  $('#dns-records').innerHTML=localDns.records.length?localDns.records.map(record=>`<div class="dns-record"><strong>${esc(record.domain)}</strong><span>${esc(record.type)} → ${esc(localDns.address||'not configured')}</span></div>`).join(''):'<div class="dns-empty">Enable a proxy host or game service to publish its local record.</div>';
+}
+function servicePayload(service,enabled=service.enabled){return {name:service.name,domain:service.domain,kind:service.kind||'port',listen_port:Number(service.listen_port),protocol:service.protocol,upstream_host:service.upstream_host,upstream_port:Number(service.upstream_port),enabled:Boolean(enabled)}}
+function updateServiceMode(){const form=$('#service-form'),minecraft=form.kind.value==='minecraft';$('#raw-service-fields').classList.toggle('hidden',minecraft);$('#minecraft-service-info').classList.toggle('hidden',!minecraft);$('#raw-service-info').classList.toggle('hidden',minecraft);form.protocol.disabled=minecraft;form.listen_port.disabled=minecraft;if(minecraft){form.protocol.value='tcp';form.listen_port.value=25565}}
+function openService(service={}){const form=$('#service-form');form.reset();form.id.value=service.id||'';form.name.value=service.name||'';form.domain.value=service.domain||'';form.kind.value=service.kind||'minecraft';form.protocol.value=service.protocol||'tcp';form.listen_port.value=service.listen_port||25565;form.upstream_host.value=service.upstream_host||'';form.upstream_port.value=service.upstream_port||25565;form.enabled.checked=service.enabled??true;updateServiceMode();$('#service-dialog-title').textContent=service.id?'Edit game service':'New game service';$('#service-form-error').textContent='';$('#service-dialog').showModal()}
 
 function renderStats(){
   const active=hosts.filter(host=>host.enabled).length;
@@ -172,6 +191,11 @@ $('#search').addEventListener('input',renderHosts);
 $('#certificate-search').addEventListener('input',renderCertificates);
 $('#traffic-filter').addEventListener('input',renderLiveStream);
 $('#toggle-live').addEventListener('click',event=>{livePaused=!livePaused;event.currentTarget.textContent=livePaused?'Resume':'Pause';renderLiveTraffic();if(!livePaused)refreshStats()});
+$('#add-service').addEventListener('click',()=>openService());
+$('#service-form').kind.addEventListener('change',updateServiceMode);
+document.querySelectorAll('.close-service').forEach(button=>button.addEventListener('click',()=>$('#service-dialog').close()));
+$('#service-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,id=form.id.value,button=event.submitter;button.disabled=true;button.textContent='Applying…';const minecraft=form.kind.value==='minecraft',data={name:form.name.value,domain:form.domain.value,kind:form.kind.value,protocol:minecraft?'tcp':form.protocol.value,listen_port:minecraft?25565:Number(form.listen_port.value),upstream_host:form.upstream_host.value,upstream_port:Number(form.upstream_port.value),enabled:form.enabled.checked};try{await api(id?`/api/streams/${id}`:'/api/streams',{method:id?'PUT':'POST',body:JSON.stringify(data)});form.closest('dialog').close();await refreshAll();toast('Game service applied')}catch(error){$('#service-form-error').textContent=error.message}finally{button.disabled=false;button.textContent='Save and apply'}});
+$('#services-list').addEventListener('click',async event=>{const button=event.target.closest('button'),id=Number(button?.dataset.id);if(!id)return;const service=services.find(item=>item.id===id);if(button.classList.contains('toggle-service')){button.disabled=true;try{await api(`/api/streams/${id}`,{method:'PUT',body:JSON.stringify(servicePayload(service,!service.enabled))});await refreshAll();toast(service.enabled?'Game service disabled':'Game service enabled')}catch(error){toast(error.message)}finally{button.disabled=false}}if(button.classList.contains('edit-service'))openService(service);if(button.classList.contains('delete-service')&&confirm(`Delete ${service.name}?`)){try{await api(`/api/streams/${id}`,{method:'DELETE'});await refreshAll();toast('Game service deleted')}catch(error){toast(error.message)}}});
 $('#add-user').addEventListener('click',()=>openUser());
 document.querySelectorAll('.close-user').forEach(button=>button.addEventListener('click',()=>$('#user-dialog').close()));
 $('#user-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,id=form.id.value,button=event.submitter;button.disabled=true;button.textContent='Saving…';const existing=users.find(user=>user.id===Number(id));const data={username:form.username.disabled?existing.username:form.username.value,role:form.role.disabled?existing.role:form.role.value,password:form.password.value,enabled:form.enabled.disabled?existing.enabled:form.enabled.checked};try{await api(id?`/api/users/${id}`:'/api/users',{method:id?'PUT':'POST',body:JSON.stringify(data)});form.closest('dialog').close();if(id&&Number(id)===me.id&&data.password){toast('Password changed. Please sign in again');setTimeout(()=>location.reload(),1000);return}users=await api('/api/users');renderUsers();toast(id?'User updated':'User created')}catch(error){$('#user-form-error').textContent=error.message}finally{button.disabled=false;button.textContent='Save user'}});

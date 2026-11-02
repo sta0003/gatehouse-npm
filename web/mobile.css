@@ -1,3 +1,5 @@
 @media (max-width: 760px) {
-  .sidebar nav { grid-template-columns: repeat(auto-fit, minmax(45px, 1fr)); }
+  .sidebar nav { display:flex;overflow-x:auto;scrollbar-width:none; }
+  .sidebar nav::-webkit-scrollbar { display:none; }
+  .sidebar nav a { flex:1 0 48px; }
 }
