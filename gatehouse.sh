@@ -68,10 +68,6 @@ write_password() {
 ensure_environment() {
   local detected_ip configured_ip
   mkdir -p data letsencrypt
-  if [[ ! -f data/mc-router-routes.json ]]; then
-    printf '{"default-server":null,"mappings":{}}\n' > data/mc-router-routes.json
-  fi
-  chmod 644 data/mc-router-routes.json
   if [[ ! -f .env ]] || grep -q '^ADMIN_PASSWORD=replace-this-' .env; then
     write_password
   else
@@ -104,13 +100,6 @@ wait_for_health() {
     docker compose logs --tail 40 gatehouse
     fail "Gatehouse did not become healthy (state: ${state:-unknown})."
   fi
-  for _ in {1..20}; do
-    state="$(docker inspect --format '{{.State.Status}}' gatehouse-mc-router 2>/dev/null || true)"
-    [[ "$state" == 'running' ]] && return
-    sleep 1
-  done
-  docker compose logs --tail 40 mc-router
-  fail "Minecraft router did not start (state: ${state:-unknown})."
 }
 
 show_address() {
@@ -124,14 +113,14 @@ show_address() {
   printf 'Username:  admin\n'
   printf 'Data:      %s/data\n' "$SCRIPT_DIR"
   printf 'TLS state: %s/letsencrypt\n\n' "$SCRIPT_DIR"
-  warn "Keep ports 53 and 8080 private. Forward 80/443, TCP 25565 for Minecraft, and only other game ports you configure."
+  warn "Keep ports 53 and 8080 private. Forward 80/443 and only the game ports you configure."
 }
 
 install_gatehouse() {
   require_docker
   ensure_environment
   info "Building and starting Gatehouse…"
-  docker compose up -d --build
+  docker compose up -d --build --remove-orphans
   wait_for_health
   show_address
 }
@@ -140,7 +129,7 @@ start_gatehouse() {
   require_docker
   ensure_environment
   info "Starting Gatehouse…"
-  docker compose up -d
+  docker compose up -d --remove-orphans
   wait_for_health
   show_address
 }
@@ -156,7 +145,7 @@ restart_gatehouse() {
   require_docker
   ensure_environment
   info "Restarting Gatehouse…"
-  docker compose restart
+  docker compose up -d --force-recreate --remove-orphans
   wait_for_health
   show_address
 }
@@ -165,7 +154,7 @@ rebuild_gatehouse() {
   require_docker
   ensure_environment
   info "Rebuilding Gatehouse and applying local changes…"
-  docker compose up -d --build
+  docker compose up -d --build --remove-orphans
   wait_for_health
   show_address
 }

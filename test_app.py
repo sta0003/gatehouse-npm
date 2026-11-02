@@ -10,7 +10,6 @@ temp = tempfile.TemporaryDirectory()
 os.environ["DATA_DIR"] = temp.name
 os.environ["NGINX_OUTPUT"] = str(Path(temp.name) / "proxy.conf")
 os.environ["STREAM_OUTPUT"] = str(Path(temp.name) / "streams.conf")
-os.environ["MC_ROUTER_OUTPUT"] = str(Path(temp.name) / "mc-router-routes.json")
 os.environ["DNS_HOSTS"] = str(Path(temp.name) / "local-dns-hosts")
 os.environ["DNSMASQ_PID"] = str(Path(temp.name) / "dnsmasq.pid")
 os.environ["GATEHOUSE_LAN_IP"] = "192.168.1.50"
@@ -81,25 +80,25 @@ class ValidationTests(unittest.TestCase):
             connection.execute("INSERT INTO proxy_hosts (domains, upstream_scheme, upstream_host, upstream_port, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)", ("paused.example.com", "http", "10.0.0.6", 8080, 0, 1))
         self.assertNotIn("paused.example.com", app.render_config())
 
-    def test_validates_and_renders_minecraft_tcp_service(self):
+    def test_validates_and_renders_game_port_remap(self):
         app.initialize()
         values = app.validate_stream_payload({
-            "name": "Minecraft", "domain": "mc.example.com", "kind": "minecraft", "listen_port": 25565,
-            "protocol": "tcp", "upstream_host": "192.168.1.60", "upstream_port": 25565,
+            "name": "Game server", "domain": "game.example.com", "listen_port": 25565,
+            "protocol": "tcp", "upstream_host": "192.168.1.60", "upstream_port": 25566,
         })
         with app.db() as connection:
             connection.execute("DELETE FROM stream_routes")
             connection.execute(
                 "INSERT INTO stream_routes (name, domain, kind, listen_port, protocol, upstream_host, upstream_port, enabled, created_at) VALUES (:name,:domain,:kind,:listen_port,:protocol,:upstream_host,:upstream_port,:enabled,1)", values
             )
-        self.assertNotIn("listen 25565", app.render_stream_config())
-        rendered = json.loads(app.render_mc_router_config())
-        self.assertEqual(rendered["mappings"], {"mc.example.com": "192.168.1.60:25565"})
+        rendered = app.render_stream_config()
+        self.assertIn("listen 25565", rendered)
+        self.assertIn("proxy_pass 192.168.1.60:25566", rendered)
 
     def test_renders_raw_tcp_service_in_nginx(self):
         app.initialize()
         values = app.validate_stream_payload({
-            "name": "Other game", "domain": "game.example.com", "kind": "port", "listen_port": 27015,
+            "name": "Other game", "domain": "game.example.com", "listen_port": 27015,
             "protocol": "tcp", "upstream_host": "192.168.1.61", "upstream_port": 27016,
         })
         with app.db() as connection:
@@ -114,21 +113,12 @@ class ValidationTests(unittest.TestCase):
     def test_rejects_reserved_and_duplicate_stream_ports(self):
         app.initialize()
         with self.assertRaisesRegex(ValueError, "reserved"):
-            app.validate_stream_payload({"name": "Bad", "domain": "bad.example.com", "kind": "port", "listen_port": 443, "protocol": "tcp", "upstream_host": "10.0.0.2", "upstream_port": 443})
+            app.validate_stream_payload({"name": "Bad", "domain": "bad.example.com", "listen_port": 443, "protocol": "tcp", "upstream_host": "10.0.0.2", "upstream_port": 443})
         with app.db() as connection:
             connection.execute("DELETE FROM stream_routes")
             connection.execute("INSERT INTO stream_routes (name, domain, kind, listen_port, protocol, upstream_host, upstream_port, created_at) VALUES ('Existing','one.example.com','port',25565,'both','10.0.0.2',25565,1)")
             with self.assertRaisesRegex(ValueError, "already assigned"):
-                app.ensure_stream_route_available(connection, {"kind": "port", "domain": "two.example.com", "listen_port": 25565, "protocol": "tcp"})
-
-    def test_allows_multiple_minecraft_domains_on_25565(self):
-        app.initialize()
-        with app.db() as connection:
-            connection.execute("DELETE FROM stream_routes")
-            connection.execute("INSERT INTO stream_routes (name, domain, kind, listen_port, protocol, upstream_host, upstream_port, created_at) VALUES ('One','one.example.com','minecraft',25565,'tcp','10.0.0.2',25566,1)")
-            app.ensure_stream_route_available(connection, {"kind": "minecraft", "domain": "two.example.com", "listen_port": 25565, "protocol": "tcp"})
-            with self.assertRaisesRegex(ValueError, "domain is already assigned"):
-                app.ensure_stream_route_available(connection, {"kind": "minecraft", "domain": "one.example.com", "listen_port": 25565, "protocol": "tcp"})
+                app.ensure_stream_route_available(connection, {"domain": "two.example.com", "listen_port": 25565, "protocol": "tcp"})
 
     def test_local_dns_includes_web_and_game_domains(self):
         app.initialize()
@@ -136,11 +126,11 @@ class ValidationTests(unittest.TestCase):
             connection.execute("DELETE FROM proxy_hosts")
             connection.execute("DELETE FROM stream_routes")
             connection.execute("INSERT INTO proxy_hosts (domains, upstream_scheme, upstream_host, upstream_port, created_at) VALUES ('app.example.com alias.example.com','http','10.0.0.3',80,1)")
-            connection.execute("INSERT INTO stream_routes (name, domain, listen_port, protocol, upstream_host, upstream_port, created_at) VALUES ('Minecraft','mc.example.com',25565,'tcp','10.0.0.4',25565,1)")
+            connection.execute("INSERT INTO stream_routes (name, domain, listen_port, protocol, upstream_host, upstream_port, created_at) VALUES ('Game server','game.example.com',25565,'tcp','10.0.0.4',25565,1)")
         rendered = app.render_dns_hosts()
         self.assertIn("192.168.1.50 app.example.com", rendered)
         self.assertIn("192.168.1.50 alias.example.com", rendered)
-        self.assertIn("192.168.1.50 mc.example.com", rendered)
+        self.assertIn("192.168.1.50 game.example.com", rendered)
 
     def test_reads_certificate_metadata(self):
         domain = "secure.example.com"

@@ -137,13 +137,13 @@
 
         <section id="services-detail" class="services-detail hidden">
           <div class="service-summary glass">
-            <div><p class="overline">GAME GATEWAY</p><h2>Game and port services</h2><p>Route Minecraft by domain, or forward a dedicated TCP/UDP port.</p></div>
+            <div><p class="overline">GAME GATEWAY</p><h2>Game server routes</h2><p>Map a public TCP/UDP listening port to any internal server and port.</p></div>
             <button id="add-service" class="primary">＋ New game service</button>
           </div>
-          <div class="service-notice"><strong>Minecraft hostname routing</strong><span>Multiple Java servers can share public TCP port 25565. Other games normally need a unique external port and matching router/NAT rule.</span></div>
+          <div class="service-notice"><strong>Port remapping</strong><span>The domain creates a convenient DNS name. Each service still needs a unique public IP/port combination because generic game traffic does not include the requested DNS name.</span></div>
           <article class="panel glass services-panel">
             <div class="services-head"><span>SERVICE / DOMAIN</span><span>PUBLIC LISTENER</span><span>DESTINATION</span><span>STATE</span><span></span></div>
-            <div id="services-empty" class="empty hidden"><div>⌁</div><h3>No game services</h3><p>Add Minecraft, Bedrock, voice, or another TCP/UDP service.</p></div>
+            <div id="services-empty" class="empty hidden"><div>⌁</div><h3>No game services</h3><p>Add any TCP or UDP game server and remap its destination port.</p></div>
             <div id="services-list"></div>
           </article>
         </section>
@@ -234,16 +234,14 @@
     <form id="service-form">
       <div class="dialog-head"><div><p class="overline">TCP / UDP ROUTE</p><h2 id="service-dialog-title">New game service</h2></div><button type="button" class="dialog-close close-service">×</button></div>
       <input type="hidden" name="id">
-      <label>Service name <small>A friendly dashboard label</small><input name="name" maxlength="64" placeholder="Minecraft survival" required></label>
-      <label>Domain name <small>Used for public DNS and the automatic local DNS record</small><input name="domain" placeholder="minecraft.example.com" required></label>
-      <label>Routing mode<select name="kind"><option value="minecraft">Minecraft Java — domain on port 25565</option><option value="port">Raw TCP / UDP — dedicated port</option></select></label>
-      <div id="raw-service-fields" class="service-port-grid hidden">
+      <label>Service name <small>A friendly dashboard label</small><input name="name" maxlength="64" placeholder="Game server one" required></label>
+      <label>Domain name <small>Used for public DNS and the automatic local DNS record</small><input name="domain" placeholder="game.example.com" required></label>
+      <div class="service-port-grid">
         <label>Protocol<select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></label>
-        <label>Public source port<input name="listen_port" type="number" min="1" max="65535" value="25565" required></label>
+        <label>Public listening port <small>The port players connect to</small><input name="listen_port" type="number" min="1" max="65535" value="25565" required></label>
       </div>
       <div class="upstream"><label class="grow">Internal server IP / host<input name="upstream_host" placeholder="192.168.1.60" required></label><label>Destination port<input name="upstream_port" type="number" min="1" max="65535" value="25565" required></label></div>
-      <div id="minecraft-service-info" class="info-box">Forward TCP 25565 from your router to Gatehouse once. The Minecraft domain selects this internal server and port.</div>
-      <div id="raw-service-info" class="info-box hidden">Create a matching router port-forward from this public source port to the same port on Gatehouse.</div>
+      <div class="info-box">Create a matching router/NAT rule that forwards the public listening port to the same port on Gatehouse. Gatehouse then remaps it to the internal destination port.</div>
       <label class="switch-row"><span><strong>Service enabled</strong><small>Publish this route to the live game gateway.</small></span><input name="enabled" type="checkbox" checked><i></i></label>
       <p id="service-form-error" class="form-error"></p>
       <div class="dialog-actions"><button type="button" class="ghost close-service">Cancel</button><button type="submit" class="primary">Save and apply</button></div>

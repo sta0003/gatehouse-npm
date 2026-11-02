@@ -24,19 +24,16 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib import error as urllib_error, request as urllib_request
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "proxy.db"
 NGINX_OUTPUT = Path(os.environ.get("NGINX_OUTPUT", "/etc/nginx/conf.d/proxy-hosts.conf"))
 STREAM_OUTPUT = Path(os.environ.get("STREAM_OUTPUT", "/etc/nginx/stream-conf.d/game-services.conf"))
-MC_ROUTER_OUTPUT = Path(os.environ.get("MC_ROUTER_OUTPUT", "/data/mc-router-routes.json"))
 DNS_HOSTS = Path(os.environ.get("DNS_HOSTS", "/data/local-dns-hosts"))
 DNSMASQ_PID = Path(os.environ.get("DNSMASQ_PID", "/run/gatehouse-dnsmasq.pid"))
 GATEHOUSE_LAN_IP = os.environ.get("GATEHOUSE_LAN_IP", "").strip()
-MC_ROUTER_API = os.environ.get("MC_ROUTER_API", "http://127.0.0.1:25564").rstrip("/")
 WEB_ROOT = Path(__file__).with_name("web")
 CERT_ROOT = Path(os.environ.get("CERT_ROOT", "/etc/letsencrypt/live"))
 CERT_STORAGE_ROOT = Path(os.environ.get("CERT_STORAGE_ROOT", str(CERT_ROOT.parent)))
@@ -119,7 +116,7 @@ def initialize() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 domain TEXT NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'port' CHECK (kind IN ('port', 'minecraft')),
+                kind TEXT NOT NULL DEFAULT 'port',
                 listen_port INTEGER NOT NULL,
                 protocol TEXT NOT NULL CHECK (protocol IN ('tcp', 'udp', 'both')),
                 upstream_host TEXT NOT NULL,
@@ -130,7 +127,15 @@ def initialize() -> None:
         )
         stream_columns = {row["name"] for row in connection.execute("PRAGMA table_info(stream_routes)")}
         if "kind" not in stream_columns:
-            connection.execute("ALTER TABLE stream_routes ADD COLUMN kind TEXT NOT NULL DEFAULT 'port' CHECK (kind IN ('port', 'minecraft'))")
+            connection.execute("ALTER TABLE stream_routes ADD COLUMN kind TEXT NOT NULL DEFAULT 'port'")
+        legacy_routes = connection.execute("SELECT id, enabled FROM stream_routes WHERE kind != 'port' ORDER BY id").fetchall()
+        port_claimed = bool(connection.execute(
+            "SELECT 1 FROM stream_routes WHERE kind = 'port' AND enabled = 1 AND listen_port = 25565 AND protocol IN ('tcp', 'both') LIMIT 1"
+        ).fetchone())
+        for route in legacy_routes:
+            enabled = int(bool(route["enabled"]) and not port_claimed)
+            connection.execute("UPDATE stream_routes SET kind = 'port', enabled = ? WHERE id = ?", (enabled, route["id"]))
+            port_claimed = port_claimed or bool(enabled)
         if not connection.execute("SELECT 1 FROM users LIMIT 1").fetchone():
             connection.execute(
                 "INSERT INTO users (username, password_hash, role, enabled, created_at) VALUES (?, ?, 'admin', 1, ?)",
@@ -208,10 +213,7 @@ def validate_stream_payload(payload: dict) -> dict:
     domain = normalize_domains(str(payload.get("domain", "")))
     if len(domain) != 1:
         raise ValueError("Enter one domain name for this game service")
-    kind = str(payload.get("kind", "minecraft")).lower()
-    if kind not in {"port", "minecraft"}:
-        raise ValueError("Routing mode must be Minecraft Java or raw TCP/UDP")
-    protocol = "tcp" if kind == "minecraft" else str(payload.get("protocol", "tcp")).lower()
+    protocol = str(payload.get("protocol", "tcp")).lower()
     if protocol not in {"tcp", "udp", "both"}:
         raise ValueError("Protocol must be TCP, UDP, or both")
     host = str(payload.get("upstream_host", "")).strip()
@@ -223,7 +225,7 @@ def validate_stream_payload(payload: dict) -> dict:
         if not re.fullmatch(r"[A-Za-z0-9._-]+", host):
             raise ValueError("Enter a valid upstream hostname or IP address") from None
     try:
-        listen_port = 25565 if kind == "minecraft" else int(payload.get("listen_port"))
+        listen_port = int(payload.get("listen_port"))
         upstream_port = int(payload.get("upstream_port"))
     except (TypeError, ValueError):
         raise ValueError("Source and destination ports must be numbers") from None
@@ -232,32 +234,16 @@ def validate_stream_payload(payload: dict) -> dict:
     if listen_port in {53, 80, 443, 8080}:
         raise ValueError(f"Port {listen_port} is reserved by Gatehouse")
     return {
-        "name": name, "domain": domain[0], "kind": kind, "listen_port": listen_port,
+        "name": name, "domain": domain[0], "kind": "port", "listen_port": listen_port,
         "protocol": protocol, "upstream_host": host,
         "upstream_port": upstream_port, "enabled": int(bool(payload.get("enabled", True))),
     }
 
 
 def ensure_stream_route_available(connection: sqlite3.Connection, values: dict, exclude_id: int | None = None) -> None:
-    kind, listen_port, protocol = values["kind"], values["listen_port"], values["protocol"]
-    if kind == "minecraft":
-        duplicate = connection.execute(
-            "SELECT id FROM stream_routes WHERE kind = 'minecraft' AND domain = ?", (values["domain"],)
-        ).fetchone()
-        if duplicate and duplicate["id"] != exclude_id:
-            raise ValueError("That Minecraft domain is already assigned")
-        raw_tcp = connection.execute(
-            "SELECT id FROM stream_routes WHERE kind = 'port' AND listen_port = 25565 AND protocol IN ('tcp', 'both')"
-        ).fetchall()
-        if any(row["id"] != exclude_id for row in raw_tcp):
-            raise ValueError("Port 25565/TCP is already assigned to a raw port route")
-        return
-    if listen_port == 25565 and protocol in {"tcp", "both"}:
-        minecraft = connection.execute("SELECT id FROM stream_routes WHERE kind = 'minecraft'").fetchall()
-        if any(row["id"] != exclude_id for row in minecraft):
-            raise ValueError("Port 25565/TCP is reserved by Minecraft hostname routing")
+    listen_port, protocol = values["listen_port"], values["protocol"]
     rows = connection.execute(
-        "SELECT id, protocol FROM stream_routes WHERE kind = 'port' AND listen_port = ?", (listen_port,)
+        "SELECT id, protocol FROM stream_routes WHERE listen_port = ?", (listen_port,)
     ).fetchall()
     requested = {"tcp", "udp"} if protocol == "both" else {protocol}
     for row in rows:
@@ -448,23 +434,11 @@ server {{
 def render_stream_config(connection: sqlite3.Connection | None = None) -> str:
     owns_connection = connection is None
     connection = connection or db()
-    rows = connection.execute("SELECT * FROM stream_routes WHERE enabled = 1 AND kind = 'port' ORDER BY listen_port, id").fetchall()
+    rows = connection.execute("SELECT * FROM stream_routes WHERE enabled = 1 ORDER BY listen_port, id").fetchall()
     if owns_connection:
         connection.close()
     header = "# Generated by Gatehouse. TCP/UDP services are selected by source port.\n"
     return header + "\n\n".join(stream_route_config(row) for row in rows) + "\n"
-
-
-def render_mc_router_config(connection: sqlite3.Connection | None = None) -> str:
-    owns_connection = connection is None
-    connection = connection or db()
-    rows = connection.execute(
-        "SELECT domain, upstream_host, upstream_port FROM stream_routes WHERE enabled = 1 AND kind = 'minecraft' ORDER BY domain"
-    ).fetchall()
-    if owns_connection:
-        connection.close()
-    mappings = {row["domain"]: f'{row["upstream_host"]}:{row["upstream_port"]}' for row in rows}
-    return json.dumps({"default-server": None, "mappings": mappings}, indent=2) + "\n"
 
 
 def local_dns_address() -> str | None:
@@ -510,37 +484,6 @@ def reload_dnsmasq() -> None:
         pass
 
 
-def sync_mc_router(connection: sqlite3.Connection | None = None) -> None:
-    owns_connection = connection is None
-    connection = connection or db()
-    rows = connection.execute(
-        "SELECT domain, upstream_host, upstream_port FROM stream_routes WHERE enabled = 1 AND kind = 'minecraft'"
-    ).fetchall()
-    desired = {row["domain"]: f'{row["upstream_host"]}:{row["upstream_port"]}' for row in rows}
-    if owns_connection:
-        connection.close()
-    try:
-        list_request = urllib_request.Request(f"{MC_ROUTER_API}/routes", headers={"Accept": "application/json"})
-        with urllib_request.urlopen(list_request, timeout=1) as response:
-            current_payload = json.load(response)
-        current = {domain: details.get("backend") for domain, details in current_payload.items()}
-        for domain in current.keys() - desired.keys():
-            delete_request = urllib_request.Request(f"{MC_ROUTER_API}/routes/{quote(domain, safe='')}", method="DELETE")
-            urllib_request.urlopen(delete_request, timeout=1).close()
-        for domain, backend in desired.items():
-            if current.get(domain) == backend:
-                continue
-            payload = json.dumps({"serverAddress": domain, "backend": backend}).encode()
-            update_request = urllib_request.Request(
-                f"{MC_ROUTER_API}/routes", data=payload, method="POST", headers={"Content-Type": "application/json"}
-            )
-            urllib_request.urlopen(update_request, timeout=1).close()
-    except (OSError, ValueError, json.JSONDecodeError, urllib_error.HTTPError):
-        # The persisted route file is loaded when the sidecar starts. Its API can
-        # briefly be unavailable while Docker is starting or restarting it.
-        pass
-
-
 def run_nginx(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["nginx", *args], text=True, capture_output=True, timeout=20)
 
@@ -549,7 +492,6 @@ def render_and_reload(reload_nginx: bool = True, connection: sqlite3.Connection 
     outputs = {
         NGINX_OUTPUT: render_config(connection),
         STREAM_OUTPUT: render_stream_config(connection),
-        MC_ROUTER_OUTPUT: render_mc_router_config(connection),
         DNS_HOSTS: render_dns_hosts(connection),
     }
     previous = {path: path.read_text() if path.exists() else None for path in outputs}
@@ -562,7 +504,6 @@ def render_and_reload(reload_nginx: bool = True, connection: sqlite3.Connection 
         temporary_path.replace(path)
     if not reload_nginx or not shutil_which("nginx"):
         reload_dnsmasq()
-        sync_mc_router(connection)
         return
     check = run_nginx("-t")
     if check.returncode:
@@ -581,7 +522,6 @@ def render_and_reload(reload_nginx: bool = True, connection: sqlite3.Connection 
                 path.write_text(old_content)
         raise RuntimeError(reload_result.stderr.strip() or "NGINX reload failed")
     reload_dnsmasq()
-    sync_mc_router(connection)
 
 
 def ensure_domains_available(connection: sqlite3.Connection, domains: str, exclude_id: int | None = None) -> None:
