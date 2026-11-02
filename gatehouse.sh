@@ -26,7 +26,7 @@ Usage: ./gatehouse.sh COMMAND
   stop      Stop Gatehouse without deleting its data
   restart   Restart Gatehouse
   rebuild   Rebuild the image and apply local code changes
-  update    Pull the latest Git version, rebuild, and start
+  update    Download the latest version, rebuild, and start (Git optional)
   status    Show container and health status
   logs      Follow the Gatehouse logs (Ctrl+C to exit)
   help      Show this help
@@ -159,17 +159,72 @@ rebuild_gatehouse() {
   show_address
 }
 
+cleanup_archive_update() {
+  if [[ -n "${GATEHOUSE_ARCHIVE_UPDATE_DIR:-}" && -d "$GATEHOUSE_ARCHIVE_UPDATE_DIR" ]]; then
+    case "$GATEHOUSE_ARCHIVE_UPDATE_DIR" in
+      "${TMPDIR:-/tmp}"/gatehouse-update.*) rm -rf -- "$GATEHOUSE_ARCHIVE_UPDATE_DIR" ;;
+    esac
+  fi
+  GATEHOUSE_ARCHIVE_UPDATE_DIR=''
+}
+
+download_archive_update() {
+  local archive manifest stage archive_root
+  command -v curl >/dev/null 2>&1 || fail "curl is required for archive updates."
+  command -v tar >/dev/null 2>&1 || fail "tar is required for archive updates."
+
+  GATEHOUSE_ARCHIVE_UPDATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gatehouse-update.XXXXXX")"
+  archive="$GATEHOUSE_ARCHIVE_UPDATE_DIR/gatehouse-update.tar.gz"
+  manifest="$GATEHOUSE_ARCHIVE_UPDATE_DIR/manifest.txt"
+  stage="$GATEHOUSE_ARCHIVE_UPDATE_DIR/stage"
+  mkdir -p "$stage"
+  trap cleanup_archive_update EXIT
+
+  info "Downloading the latest Gatehouse archive…"
+  curl --fail --location --silent --show-error --retry 3 \
+    --output "$archive" \
+    https://github.com/sta0003/gatehouse-npm/archive/refs/heads/main.tar.gz
+
+  tar -tzf "$archive" > "$manifest" || fail "The downloaded update archive is invalid."
+  archive_root="$(awk -F/ 'NR == 1 { print $1 }' "$manifest")"
+  [[ -n "$archive_root" ]] || fail "The update archive is empty."
+  if ! awk -v root="$archive_root" '
+      index($0, root "/") != 1 || $0 ~ /(^|\/)\.\.($|\/)/ || substr($0, 1, 1) == "/" { unsafe = 1 }
+      END { exit unsafe }
+    ' "$manifest"; then
+    fail "The update archive contains an unsafe path."
+  fi
+
+  tar -xzf "$archive" -C "$stage" --strip-components=1 \
+    --exclude="$archive_root/data" --exclude="$archive_root/data/*" \
+    --exclude="$archive_root/letsencrypt" --exclude="$archive_root/letsencrypt/*" \
+    --exclude="$archive_root/.env"
+  [[ -f "$stage/gatehouse.sh" && -f "$stage/compose.yaml" && -f "$stage/app.py" ]] \
+    || fail "The update archive is missing required Gatehouse files."
+  [[ ! -e "$stage/.env" && ! -e "$stage/data" && ! -e "$stage/letsencrypt" ]] \
+    || fail "The staged update unexpectedly contains persistent installation data."
+
+  cp -a "$stage/." "$SCRIPT_DIR/"
+  chmod +x "$SCRIPT_DIR/gatehouse.sh"
+  cleanup_archive_update
+  trap - EXIT
+  success "Application files updated. Configuration, data, and certificates were preserved."
+}
+
 update_gatehouse() {
   require_docker
   ensure_environment
-  command -v git >/dev/null 2>&1 || fail "Git is required for updates."
-  [[ -d .git ]] || fail "This installation was not cloned with Git. Download the new files, then run ./gatehouse.sh rebuild."
-  if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-    fail "Local tracked files have changes. Commit or resolve them before updating; no files were overwritten."
-  fi
   warn "Create a dashboard backup before major upgrades."
-  info "Downloading the latest Gatehouse version…"
-  git pull --ff-only
+  if [[ -d .git ]]; then
+    command -v git >/dev/null 2>&1 || fail "This is a Git installation, but the git command is unavailable."
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+      fail "Local tracked files have changes. Commit or resolve them before updating; no files were overwritten."
+    fi
+    info "Downloading the latest Gatehouse version with Git…"
+    git pull --ff-only
+  else
+    download_archive_update
+  fi
   rebuild_gatehouse
 }
 
@@ -203,20 +258,22 @@ menu() {
   esac
 }
 
-command_name="${1:-}"
-if [[ -z "$command_name" ]]; then
-  [[ -t 0 ]] && menu || usage
-else
-  case "$command_name" in
-    install) install_gatehouse ;;
-    start) start_gatehouse ;;
-    stop) stop_gatehouse ;;
-    restart) restart_gatehouse ;;
-    rebuild) rebuild_gatehouse ;;
-    update) update_gatehouse ;;
-    status) show_status ;;
-    logs) show_logs ;;
-    help|-h|--help) usage ;;
-    *) usage; fail "Unknown command: $command_name" ;;
-  esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  command_name="${1:-}"
+  if [[ -z "$command_name" ]]; then
+    [[ -t 0 ]] && menu || usage
+  else
+    case "$command_name" in
+      install) install_gatehouse ;;
+      start) start_gatehouse ;;
+      stop) stop_gatehouse ;;
+      restart) restart_gatehouse ;;
+      rebuild) rebuild_gatehouse ;;
+      update) update_gatehouse ;;
+      status) show_status ;;
+      logs) show_logs ;;
+      help|-h|--help) usage ;;
+      *) usage; fail "Unknown command: $command_name" ;;
+    esac
+  fi
 fi

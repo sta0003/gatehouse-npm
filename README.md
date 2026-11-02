@@ -38,6 +38,27 @@ For a game server, forward its public TCP/UDP port to the same port on Gatehouse
 
 The helper also supports `start`, `stop`, `restart`, `rebuild`, `update`, `status`, and `logs`. Run `./gatehouse.sh help` for the complete list. It never deletes the persistent `data` or `letsencrypt` directories.
 
+### Updates with or without Git
+
+Run the same command for every installation:
+
+```sh
+./gatehouse.sh update
+```
+
+For a Git clone, Gatehouse uses a fast-forward-only `git pull` and refuses to overwrite tracked local changes. For a ZIP/TAR installation, it downloads the latest GitHub archive into a temporary staging directory, validates its paths and required files, then replaces only the application files. The existing `.env`, `data`, and `letsencrypt` directories are preserved. Both update methods rebuild the image, remove obsolete Compose containers, wait for Gatehouse to become healthy, and retain all persistent configuration.
+
+Create a dashboard backup before major upgrades. If Dockge manages the stack, run the update from the TrueNAS host shell in the Gatehouse project directory; the helper performs the image rebuild and container recreation itself.
+
+An archive installation created before gitless updates were added needs the new helper once. From its Gatehouse directory, run:
+
+```sh
+curl -fL --retry 3 -o gatehouse.sh.new https://raw.githubusercontent.com/sta0003/gatehouse-npm/main/gatehouse.sh
+chmod +x gatehouse.sh.new
+mv gatehouse.sh.new gatehouse.sh
+./gatehouse.sh update
+```
+
 Do not expose port 8080 to the public internet. Restrict it with your host firewall, a VPN, or a trusted management VLAN.
 
 ## HTTPS requirements
